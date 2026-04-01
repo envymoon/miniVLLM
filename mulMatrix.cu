@@ -1,4 +1,4 @@
-__global__ void matmul_naive(
+__global__ void matMul_naive(
     const float* A,
     const float* B,
     float* C,

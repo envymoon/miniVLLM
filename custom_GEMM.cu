@@ -57,7 +57,7 @@ template <int tile_size> __global__ void tiling_Matrix (const int n,
 
 
 
-int GeMMs(int argc, char **argv, int tile_size, const dim3 &dim_a, const dim3 &dim_b) {
+void GeMMs(int argc, char **argv, int tile_size, const dim3 &dim_a, const dim3 &dim_b) {
     dim3   dim_c = (dim_b.x, dim_a.y, 1);
 
     float* h_c, *h_b, *h_a;
