@@ -113,9 +113,9 @@ int GeMMs(int argc, char **argv, int tile_size, const dim3 &dim_a, const dim3 &d
     size_t sz_b = dim_b.x * dim_b.y * sizeof(float);
     size_t sz_c = dim_c.x * dim_c.y * sizeof(float);
 
-    checkCudaErrors(cudaMallocHost(&h_a, sz_a));
-    checkCudaErrors(cudaMallocHost(&h_b, sz_b));
-    checkCudaErrors(cudaMallocHost(&h_c, sz_c));
+    checkCudaErrors(cudaMallocHost(reinterpret_cast<void **>(&h_a), sz_a));
+    checkCudaErrors(cudaMallocHost(reinterpret_cast<void **>(&h_b), sz_b));
+    checkCudaErrors(cudaMallocHost(reinterpret_cast<void **>(&h_c), sz_c));
 
     cudaStream_t stream;
 
