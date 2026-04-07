@@ -59,17 +59,17 @@ Detailed analysis using `ncu` (Nsight Compute) reveals the efficiency of our imp
 ```
 
 ### Getting Started
-Prerequisites
-CUDA Toolkit (On progress)
-CMake (On progress)
+Prerequisites     
+CUDA Toolkit (On progress)    
+CMake (On progress)    
 
 ## Compilation
-Bash
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
-Running Benchmarks
-Bash
+Bash   
+mkdir build && cd build    
+cmake ..    
+make -j$(nproc)   
+Running Benchmarks    
+Bash     
 
 ### Benchmark Matrix Multiplication
 ./bench_gemm --m xxxx --n xxxx --k xxxx
