@@ -4,6 +4,7 @@
 #include <iostream>  
 #include <cuda_fp16.h>
 
+const int threads_per_block = 128;
 
 template <typename T>
 __device__ __forceinline__ T cast_to(float val);
@@ -17,32 +18,68 @@ template <>
 __device__ __forceinline__ __half cast_to<__half>(float val) { return __float2half(val); }
  
 
-template <typename T, int block_size, int head_dim> __global__ void fused_kernel(
-    // const int num_heads, 
+template <typename T, int block_size, int head_dim> __global__ void fused_kernel( 
     const int max_seq_len, 
     const __restrict__ float* d_Q, 
     const __restrict__ float* d_K, 
     const __restrict__ float* d_V,
-    __restrict__ float* d_Att
+    __restrict__ float* Att_score
 ) {
-    __shared__ T t_Q[block_size][head_dim];
-    __shared__ T t_KV[block_size][head_dim];
-    //__shared__ float t_att[block_size][head_dim];
+    __shared__ T temp_Q[block_size][head_dim];
+    __shared__ T temp_KV[block_size][head_dim];
+
+    const int total_elements = block_size * head_dim;
+    const int iter = (max_seq_len + block_size + 1) / block_size;
 
     int batch_idx = gridDim.x;
     int head_idx = gridDim.y;
-    int block_idx = gridDim.z;
 
-    float local_m = -INFINITY;
-    float local_l = 0.0f;
 
-    for (int i = 0; i < max_seq_len; i++) {
-        int q_x = blockIdx.x * 4;
-        int tx = threadIdx.x;
-        t_Q[q_x][tx] =  
-        t_Q[q_x + 1][tx] = 
-        t_Q[q_x + 2][tx] = 
-        t_Q[q_x + 3][tx] = 
+    for (int i = 0; i < iter; i++) {
+        for (int j = threadIdx.x; j < total_elements; j += blockDim.x) {
+            int row = j / head_dim; // token index (0 ~ block_size-1)
+            int col = j % head_dim; // Head dimension (0 ~ head_dim-1)
+
+            // Global Memory position
+            int global_row = batch_idx * head_idx * i * block_size + row;
+            
+            // boundary check
+            if (global_row < max_seq_len && col < head_dim) {
+                temp_Q[row][col] = d_Q[global_row + col];
+            } else {
+                temp_Q[row][col] = 0.0f;
+            }
+        }
+        __syncthreads();  
+
+        
+        for (int m = 0; m < iter; m++) {
+            float sum = 0;
+            float local_max = -INFINITY;
+            float local_sum = 0.0f;
+            float local_output = 0;
+
+            for (int n = threadIdx.x; n < total_elements; n += blockDim.x) {
+                int row = n / head_dim; // token index (0 ~ block_size-1)
+                int col = n % head_dim; // Head dimension (0 ~ head_dim-1)
+
+                // Global Memory position
+                int global_row = batch_idx * head_idx * m * block_size + row;
+                
+                // boundary check
+                if (global_row < max_seq_len && col < head_dim) {
+                    temp_KV[row][col] = d_K[global_row + col];
+                } else {
+                    temp_KV[row][col] = 0.0f;
+                }
+            }
+            __syncthreads();
+
+            for (int k = 0; k < head_dim; k++) {
+                local_output = temp_Q[][] * temp_KV[][];
+            } 
+            
+        }
 
 
     }
@@ -87,15 +124,12 @@ int attention_softmax_fused(
     cudaCheckErrors(cudaMemcpyAsync(d_V, h_V, cudaMemcpyDeviceToHost, stream));
 
     checkCudaErrors(cudaStreamSynchronize(stream));
+    dim3 block = (threads_per_block, 1, 1);    
+    dim3 grid = (batch_size, num_heads, 1);
 
-    int block_serializing = block_size / 4
-    int num_tiles = (max_seq_len + block_size - 1) / (block_serializing);
-    dim3 block = (block_serializing, 1, 1);    
-    dim3 grid = (batch_size, num_heads, num_tiles);
+    cudaCheckErrors(cudaEventRecord(start));
 
-    cudaCheckErrors(cudaEventRecord);
-
-    // Requiring that the input tensor dimension is [Batch_size, head_num, seq_len, head_dim]
+    // Requiring that the input tensor shape is [Batch_size, head_num, seq_len, head_dim]
     // each sequence should be paddded to same length
     if (is_fp16) {
         using T = __half;
