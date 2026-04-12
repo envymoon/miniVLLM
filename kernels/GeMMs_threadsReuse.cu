@@ -78,7 +78,7 @@ template <int tile_size> __global__ void tiling_matMul (
         __syncthreads();
 
   
-#pragma unroll
+        #pragma unroll
         for (int j = 0; j < tile_size; j++) {
             float a0 = tile_A[threadIdx.y * 2][j];
             float a1 = tile_A[threadIdx.y * 2 + 1][j];

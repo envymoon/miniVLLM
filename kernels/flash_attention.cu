@@ -1,30 +1,24 @@
+#include <stdio>
+#include <stdlib>
+#include <iostream>
+
 #include <cuda_runtime.h> 
 #include <helper_cuda.h>
 #include <helper_functions.h>
-#include <iostream>  
 #include <cuda_fp16.h>
 
 const int threads_per_block = 128;
-
-template <typename T>
-__device__ __forceinline__ T cast_to(float val);
-
-// float type conversion
-template <>
-__device__ __forceinline__ float cast_to<float>(float val) { return val; }
-
-// half type conversion
-template <>
-__device__ __forceinline__ __half cast_to<__half>(float val) { return __float2half(val); }
  
 
-template <typename T, int block_size, int head_dim> __global__ void fused_kernel( 
-    const int max_seq_len, 
+template <typename T, int block_size, int head_dim> __global__ void fused_kernel
+    // const int head_num,
+    (const int max_seq_len,
     const __restrict__ float* d_Q, 
     const __restrict__ float* d_K, 
     const __restrict__ float* d_V,
-    __restrict__ float* Att_score
-) {
+    __restrict__ float* Att_score) 
+{
+
     __shared__ T temp_Q[block_size][head_dim];
     __shared__ T temp_KV[block_size][head_dim];
 
@@ -33,10 +27,14 @@ template <typename T, int block_size, int head_dim> __global__ void fused_kernel
 
     int batch_idx = gridDim.x;
     int head_idx = gridDim.y;
+    int threads_num = blockDim.x;
+    int tx = threadIdx.x;
 
 
-    for (int i = 0; i < iter; i++) {
-        for (int j = threadIdx.x; j < total_elements; j += blockDim.x) {
+    for (int i = 0; i < iter; i++) 
+    {
+        for (int j = tx; j < total_elements; j += threads_num) 
+        {
             int row = j / head_dim; // token index (0 ~ block_size-1)
             int col = j % head_dim; // Head dimension (0 ~ head_dim-1)
 
@@ -44,46 +42,84 @@ template <typename T, int block_size, int head_dim> __global__ void fused_kernel
             int global_row = batch_idx * head_idx * i * block_size + row;
             
             // boundary check
-            if (global_row < max_seq_len && col < head_dim) {
+            if (global_row < max_seq_len && col < head_dim) 
+            {
                 temp_Q[row][col] = d_Q[global_row + col];
-            } else {
+            } 
+            else 
+            {
                 temp_Q[row][col] = 0.0f;
             }
         }
         __syncthreads();  
 
         
-        for (int m = 0; m < iter; m++) {
+        for (int m = 0; m < iter; m++) 
+        {
             float sum = 0;
             float local_max = -INFINITY;
             float local_sum = 0.0f;
             float local_output = 0;
 
-            for (int n = threadIdx.x; n < total_elements; n += blockDim.x) {
+            for (int n = tx; n < total_elements; n += threads_num) 
+            {
                 int row = n / head_dim; // token index (0 ~ block_size-1)
                 int col = n % head_dim; // Head dimension (0 ~ head_dim-1)
 
+                int base_idx = batch_idx * heam_num * max_seq_len * head_dim
+                               + head_idx * max_seq_len * head_dim;
                 // Global Memory position
-                int global_row = batch_idx * head_idx * m * block_size + row;
+                int global_idx = base_idx + m * block_size + row * head_dim + col;
                 
                 // boundary check
-                if (global_row < max_seq_len && col < head_dim) {
+                if (global_row < max_seq_len && col < head_dim) 
+                {
                     temp_KV[row][col] = d_K[global_row + col];
-                } else {
+                } 
+                else 
+                {
                     temp_KV[row][col] = 0.0f;
                 }
             }
             __syncthreads();
+             
 
-            for (int k = 0; k < head_dim; k++) {
-                local_output = temp_Q[][] * temp_KV[][];
-            } 
-            
+            int warp_id = tx / 32;
+            int lane_id = tx.x % 32; 
+            int inc = block_size / (threads_num / head_dim);
+
+
+            for (int r_offset = 0; r_offset < block_size; r_offset += inc) 
+            {
+                int row_i = r_offset + warp_id; 
+                
+                if (row_i < block_size) 
+                {
+                    for (int row_j = 0; row_j < block_size; row_j++) 
+                    {
+                        float score = 0.0f;
+                        
+                        #pragma unroll
+                        // warp level matrix multiplication 
+                        for (int k = lane_id; k < head_dim; k += 32) 
+                        {
+                            score += temp_Q[row_i][k] * temp_KV[row_j][k];
+                        }
+
+                        for (int offset = 16; offset > 0; offset /= 2) 
+                        {
+                            score += __shfl_xor_sync(0xffffffff, score, offset);
+                        }
+
+                        if (lane_id == 0) 
+                        {
+
+                        }
+                    }
+                }
+            }
         }
-
-
     }
-     
 }
 
 
@@ -92,8 +128,8 @@ int attention_softmax_fused(
     const int& batch_size, 
     const int& num_heads, 
     const int& max_seq_len, 
-    const int& head_dim
-) {
+    const int& head_dim) 
+{
 
     float *h_Q, *h_K, *h_V, h_Att;
 
@@ -131,9 +167,11 @@ int attention_softmax_fused(
 
     // Requiring that the input tensor shape is [Batch_size, head_num, seq_len, head_dim]
     // each sequence should be paddded to same length
-    if (is_fp16) {
+    if (is_fp16) 
+    {
         using T = __half;
-        switch (block_size) {
+        switch (block_size) 
+        {
             case 16: fused_kernel<32, head_dim><<<grid, block, 0, stream>>>(head_dim, d_Q, d_K, d_V, d_Att); 
             break;
             case 32: fused_kernel<32, head_dim><<<grid, block, 0, stream>>>(head_dim, d_Q, d_K, d_V, d_Att); 
@@ -146,9 +184,11 @@ int attention_softmax_fused(
             break;
         }
     }
-    else {
+    else 
+    {
         using T = float;
-        switch (block_size) {
+        switch (block_size) 
+        {
             case 16: fused_kernel<T, 32, head_dim><<<grid, block, 0, stream>>>(head_dim, d_Q, d_K, d_V, d_Att); 
             break;
             case 32: fused_kernel<T, 32, head_dim><<<grid, block, 0, stream>>>(head_dim, d_Q, d_K, d_V, d_Att); 
@@ -165,6 +205,7 @@ int attention_softmax_fused(
 
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) 
+{
 
 }

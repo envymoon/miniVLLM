@@ -39,7 +39,7 @@ template <int tile_size> __global__ void tiling_Matrix (const int n,
         __syncthreads();
 
   
-#pragma unroll
+        #pragma unroll
         for (int j = 0; j < tile_size; j++) {
             sum += tile_A[threadIdx.y][j] * tile_B[j][threadIdx.x];
         }
