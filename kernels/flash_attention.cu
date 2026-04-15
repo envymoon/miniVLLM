@@ -8,7 +8,7 @@
 #include <helper_functions.h>
 #include <cuda_fp16.h>
 
-const int threads_per_block = 128;
+const int threads_per_tile = 128;
 
 
 template <typename T, int block_size, int head_dim> __global__ void fused_kernel
@@ -21,7 +21,8 @@ template <typename T, int block_size, int head_dim> __global__ void fused_kernel
 {
 
     __shared__ T temp_Q[block_size][head_dim];
-    __shared__ T temp_KV[block_size][head_dim];
+    __shared__ T temp_K[block_size][head_dim];
+    __shared__ T temp_V[block_size][head_dim];
 
     const int total_elements = block_size * head_dim;
     const int iter = (max_seq_len + block_size + 1) / block_size;
@@ -31,9 +32,17 @@ template <typename T, int block_size, int head_dim> __global__ void fused_kernel
     int threads_num = blockDim.x;
     int tx = threadIdx.x;
 
-
+    // iterating over Q tiles
     for (int i = 0; i < iter; i++) 
     {
+        __shared__ float local_max[block_size] = -INFINITY;
+        // numerator sum of softmax
+        __shared__ float n_sum[block_size] = 0.0f;
+        // denominator sum of softmax
+        __shared__ float d_sum[block_size] = 0.0f;
+
+
+        // moving data into Q tiles
         for (int j = tx; j < total_elements; j += threads_num) 
         {
             int row = j / head_dim; // token index (0 ~ block_size-1)
@@ -49,6 +58,7 @@ template <typename T, int block_size, int head_dim> __global__ void fused_kernel
             {
                 temp_Q[row][col] = d_Q[global_row + col];
             } 
+            // padding with 0
             else 
             {
                 temp_Q[row][col] = 0.0f;
@@ -56,9 +66,10 @@ template <typename T, int block_size, int head_dim> __global__ void fused_kernel
         }
         __syncthreads();  
 
-        
+        // iterating over K-tiles
         for (int m = 0; m < iter; m++) 
         {
+            // moving data into K-tiles
             for (int n = tx; n < total_elements; n += threads_num) 
             {
                 int row = n / head_dim; // token index (0 ~ block_size-1)
@@ -72,82 +83,113 @@ template <typename T, int block_size, int head_dim> __global__ void fused_kernel
                 // boundary check
                 if (global_row < max_seq_len && col < head_dim) 
                 {
-                    temp_KV[row][col] = d_K[global_row + col];
+                    temp_K[row][col] = d_K[global_row + col];
                 } 
+                // padding with 0
                 else 
                 {
-                    temp_KV[row][col] = 0.0f;
+                    temp_K[row][col] = 0.0f;
                 }
             }
             __syncthreads();
 
+            // moving data into V-tiles
+            for (int n = tx; n < total_elements; n += threads_num) 
+            {
+                int row = n / head_dim; // token index (0 ~ block_size-1)
+                int col = n % head_dim; // Head dimension (0 ~ head_dim-1)
+
+                int base_idx = batch_idx * heam_num * max_seq_len * head_dim
+                               + head_idx * max_seq_len * head_dim;
+                // Global Memory position
+                int global_idx = base_idx + m * block_size + row * head_dim + col;
+                
+                // boundary check
+                if (global_row < max_seq_len && col < head_dim) 
+                {
+                    temp_V[row][col] = d_V[global_row + col];
+                } 
+                // padding with 0
+                else 
+                {
+                    temp_V[row][col] = 0.0f;
+                }
+            }
+
+            __syncthreads();
         
             float hidden_dim = sqrt(num_heads * head_dim);
 
             int warp_id = tx / 32;
-            int lane_id = tx.x % 32; 
+            int lane_id = tx % 32; 
             int inc = block_size / (threads_num / head_dim);
 
-            // Keep tracking of sum, local_max and L_correct for online-softmax
-            // __shared__ float temp_softmax[3][max_seq_len];
-
-            for (int r_offset = 0; r_offset < block_size; r_offset += inc) 
+            // iterating over each token in Q tile
+            for (int Q_row = 0; Q_row < block_size; Q_row++) 
             {
-                int row_Q = r_offset + warp_id; 
-
-                float sum = 0.0f;
-                float local_max = -INFINITY;
-                float l = 0.0f;
-                
-                if (row_Q < block_size) 
+                // iterating over K tiles
+                for (int r_offset = 0; r_offset < block_size; r_offset += inc) 
                 {
-                    for (int row_K = 0; row_K < block_size; row_K++) 
-                    {
-                        float score = 0.0f;
-                        // a Block has maximam 1024 threads, 32 warps per block
-                        __shared__ float warp_sums[32];
+                    float score = 0.0f;
+                    int row_K = r_offset + warp_id;
                         
-                        #pragma unroll
-                        // warp level matrix multiplication 
-                        for (int k = lane_id; k < head_dim; k += 32) 
-                        {
-                            score += temp_Q[row_Q][k] * temp_KV[row_j][k];
-                        }
+                    #pragma unroll
+                    // dot products of QK 
+                    for (int k = lane_id; k < head_dim; k += 32) 
+                    {
+                        score += temp_Q[row_Q][k] * temp_K[row_K][k];
+                    }
 
-                        for (int offset = 16; offset > 0; offset /= 2) 
-                        {
-                            score += __shfl_xor_sync(0xffffffff, score, offset);
-                        }
+                    // warp redutions to sum up scores
+                    for (int offset = 16; offset > 0; offset /= 2) 
+                    {
+                        score += __shfl_xor_sync(0xffffffff, score, offset);
+                    }
 
-                        if (lane_id == 0) 
-                        {  
-                            float s = (threadIdx.x < (blockDim.x / 32)) ? warp_sums[lane_id] : 0.0f;
-                            for (int offset = 16; offset > 0; offset /= 2) 
-                                s += __shfl_xor_sync(0xffffffff, s, offset);
-                            
-                            // threadIdx.x == 0 has the sum for a block
-                            if (threadIdx.x == 0) {
-                                final_block_sum = s;
-                            }
-                        }
-
+                    if (lane_id == 0) 
+                    {   
                         out = score / hidden_dim;
                         if (local_max < out) 
                         {
-                            l = expf(local_max + out);
+                            float correct = expf(local_max + out);
                             local_max = out;
-                            sum += expf(out - local_max) * ;
+                            d_sum[row_Q] += expf(out - local_max) * correct;
+                            #pragma unroll
+                            for (int d = lane_id; d < head_dim; d += 32) 
+                            {
+                                n_sum[row_Q] += expf(out - local_max) * correct * temp_V[row_K][d];
+                            }
                         }
-                        sum += expf(out - local_max);
-
+                        else 
+                        {
+                            d_sum[row_Q] += expf(out - local_max);
+                            #pragma unroll
+                            for (int d = lane_id; d < head_dim; d += 32) 
+                            {
+                                n_sum[row_Q] += expf(out - local_max) * correct * temp_V[row_K][d];
+                            }
+                        }
                     }
                 }
-
-
-
             }
         }
     }
+
+    if (tx < block_size) 
+    {
+        float output = 0.0f;
+        float numerator = n_sum[tx];
+        float denominator = d_sum[tx];
+        int att_idx = 
+            ((batch_idx * num_heads + head_idx) * 
+            max_seq_len + 
+            (i * block_size + row_i)) * 
+            max_seq_len + (m * block_size + row_j);
+        
+        output = numerator / denominator;
+        Att_score[att_idx] = output;
+    }
+
 }
 
 
@@ -156,24 +198,25 @@ int attention_softmax_fused(
     const int& batch_size, 
     const int& num_heads, 
     const int& max_seq_len, 
-    const int& head_dim) 
+    const int& head_dim,
+    bool is_fp16) 
 {
 
     float *h_Q, *h_K, *h_V, h_Att;
 
     size_t sz += (size_t)batch_size * num_heads * max_seq_len * head_dim;
 
-    cudaCheckErrors(cudaMallocHost(reinterpret_cast<void **>(&h_Q), sz));
-    cudaCheckErrors(cudaMallocHost(reinterpret_cast<void **>(&h_K), sz));
-    cudaCheckErrors(cudaMallocHost(reinterpret_cast<void **>(&h_V), sz));
-    cudaCheckErrors(cudaMallocHost(reinterpret_cast<void **>(&h_Att), sz));
+    cudaCheckErrors(cudaMallocHost(reinterpret_cast<void**>(&h_Q), sz));
+    cudaCheckErrors(cudaMallocHost(reinterpret_cast<void**>(&h_K), sz));
+    cudaCheckErrors(cudaMallocHost(reinterpret_cast<void**>(&h_V), sz));
+    cudaCheckErrors(cudaMallocHost(reinterpret_cast<void**>(&h_Att), sz));
 
     float *d_Q, *d_K, *d_V, *d_Att;
 
-    cudaCheckErrors(cudaMalloc(reinterpret_cast<void **>(&d_Q), sz));
-    cudaCheckErrors(cudaMalloc(reinterpret_cast<void **>(&d_K), sz));
-    cudaCheckErrors(cudaMalloc(reinterpret_cast<void **>(&d_V), sz));
-    cudaCheckErrors(cudaMalloc(reinterpret_cast<void **>(&d_Att), sz));
+    cudaCheckErrors(cudaMalloc(reinterpret_cast<void**>(&d_Q), sz));
+    cudaCheckErrors(cudaMalloc(reinterpret_cast<void**>(&d_K), sz));
+    cudaCheckErrors(cudaMalloc(reinterpret_cast<void**>(&d_V), sz));
+    cudaCheckErrors(cudaMalloc(reinterpret_cast<void**>(&d_Att), sz));
 
     cudaStream_t stream;
     cudaEvent_t start, stop;
@@ -188,7 +231,7 @@ int attention_softmax_fused(
     cudaCheckErrors(cudaMemcpyAsync(d_V, h_V, cudaMemcpyDeviceToHost, stream));
 
     checkCudaErrors(cudaStreamSynchronize(stream));
-    dim3 block = (threads_per_block, 1, 1);    
+    dim3 block = (threads_per_tile, 1, 1);    
     dim3 grid = (batch_size, num_heads, 1);
 
     cudaCheckErrors(cudaEventRecord(start));
