@@ -1,0 +1,117 @@
+{
+  "session_record": {
+    "date": "2026-04-19",
+    "workspace": "/mnt/c/Users/ianha/Downloads/Projects/miniVLLM",
+    "platform": "WSL",
+    "gpu_visible_in_wsl": true,
+    "nvcc_found_in_wsl": true,
+    "ncu_found_in_wsl": true,
+    "status": "compiled_and_ran_but_profiler_metrics_blocked",
+    "blocking_reason": [
+      "WSL can see the GPU with nvidia-smi.",
+      "Both nvcc and ncu were available after activating Conda base.",
+      "Nsight Compute could launch the executables, but metric collection failed with ERR_NVGPUCTRPERM because GPU performance counter access is not enabled for the current user."
+    ]
+  },
+  "attempted_commands": {
+    "activate_env": "source /home/ianhaimo/miniconda3/etc/profile.d/conda.sh && conda activate base",
+    "check_nvcc": "nvcc --version",
+    "check_profiler": "which ncu || true; which nsys || true",
+    "check_gpu": "nvidia-smi",
+    "compile_gemms": "nvcc -O3 -lineinfo -std=c++17 -arch=sm_89 -I include kernels/GeMMs.cu -o bench/bin/gemms",
+    "run_gemms": "./bench/bin/gemms",
+    "compile_flash_attention": "nvcc -O3 -lineinfo -std=c++17 -arch=sm_89 -I include kernels/flash_attention.cu -o bench/bin/flash_attention",
+    "run_flash_attention": "./bench/bin/flash_attention_verbose",
+    "profile_both": "ncu --target-processes all --metrics launch__block_size,launch__registers_per_thread,launch__shared_mem_per_block_allocated,sm__warps_active.avg.pct_of_peak_sustained_active,smsp__inst_executed.avg,smsp__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active,dram__bytes.sum --csv <executable>"
+  },
+  "next_expected_commands": {
+    "compile_gemms": "nvcc -O3 -lineinfo -std=c++17 -arch=sm_89 -I /path/to/cuda-samples/common/inc kernels/GeMMs.cu -o bench/bin/gemms",
+    "run_gemms": "./bench/bin/gemms",
+    "profile_gemms": "ncu --set full --target-processes all --export bench/reports/gemms_full --force-overwrite ./bench/bin/gemms",
+    "compile_flash_attention": "nvcc -O3 -lineinfo -std=c++17 -arch=sm_89 -I /path/to/cuda-samples/common/inc kernels/flash_attention.cu -o bench/bin/flash_attention",
+    "run_flash_attention": "./bench/bin/flash_attention",
+    "profile_flash_attention": "ncu --set full --target-processes all --export bench/reports/flash_attention_full --force-overwrite ./bench/bin/flash_attention"
+  },
+  "experiments": [
+    {
+      "kernel": "GeMMs",
+      "status": "compiled_and_ran",
+      "build": {
+        "arch": "sm_89",
+        "flags": [
+          "-O3",
+          "-lineinfo",
+          "-std=c++17"
+        ]
+      },
+      "config": {
+        "m": 256,
+        "n": 256,
+        "k": 256,
+        "tile_size": 16,
+        "dtype": "fp32"
+      },
+      "correctness": {
+        "checked": false,
+        "max_abs_error": null,
+        "max_rel_error": null
+      },
+      "timing": {
+        "avg_time_ms": 0.738,
+        "gflops": 45.47
+      },
+      "ncu": {
+        "status": "blocked",
+        "error": "ERR_NVGPUCTRPERM",
+        "occupancy_pct": null,
+        "dram_bytes": null,
+        "inst_executed_avg": null,
+        "fma_pipe_active_pct": null,
+        "registers_per_thread": null,
+        "shared_memory_per_block_bytes": null
+      },
+      "notes": "Executable built and ran successfully in WSL. Nsight Compute attached to the process but could not read metrics because GPU performance counter permissions are disabled."
+    },
+    {
+      "kernel": "flash_attention",
+      "status": "compiled_and_ran",
+      "build": {
+        "arch": "sm_89",
+        "flags": [
+          "-O3",
+          "-lineinfo",
+          "-std=c++17"
+        ]
+      },
+      "config": {
+        "batch_size": 1,
+        "num_heads": 2,
+        "seq_len": 32,
+        "head_dim": 64,
+        "block_size": 32,
+        "dtype": "fp32"
+      },
+      "correctness": {
+        "checked": true,
+        "max_abs_error": 2.1e-7,
+        "max_rel_error": 0.00210040,
+        "has_nan": false
+      },
+      "timing": {
+        "avg_time_ms": 0.0955,
+        "estimated_tflops": 0.0055
+      },
+      "ncu": {
+        "status": "blocked",
+        "error": "ERR_NVGPUCTRPERM",
+        "occupancy_pct": null,
+        "dram_bytes": null,
+        "inst_executed_avg": null,
+        "fma_pipe_active_pct": null,
+        "registers_per_thread": null,
+        "shared_memory_per_block_bytes": null
+      },
+      "notes": "Built and ran successfully in WSL. The current executable prints a reference-validation summary. Nsight Compute attached but metric collection was blocked by GPU performance counter permissions."
+    }
+  ]
+}

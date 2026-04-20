@@ -1,0 +1,4 @@
+==PROF== Connected to process 8912 (/mnt/c/Users/ianha/Downloads/Projects/miniVLLM/bench/bin/gemms)
+==ERROR== ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU Performance Counters on the target device 0. For instructions on enabling permissions and to get more information see https://developer.nvidia.com/ERR_NVGPUCTRPERM
+Performance= 12.35 GFlop/s, Time= 2.717 msec, Size= 33554432 Ops, WorkgroupSize= 64 threads/block
+==PROF== Disconnected from process 8912

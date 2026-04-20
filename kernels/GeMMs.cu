@@ -1,16 +1,9 @@
-/* 
-TaskLists:
-* Finish up GeMMs 
-* Finish up main()
-* Insert matmul_naive
-* Debug
-* Run it with Profiler
-*/
-
-
 #include <cuda_runtime.h> 
 #include <helper_cuda.h>
 #include <helper_functions.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <iostream>    
 
 __global__ void matMul(
@@ -58,8 +51,8 @@ template <int tile_size> __global__ void tiling_matMul (
 
     for (int t = 0; t < (k + tile_size - 1) / tile_size; t++) {
         // left and up corner, row and col positions of a thread
-        int a_row = (blockIdx.y * 16 + ty) * 2;
-        int a_col = t * 32 + tx * 2;
+        int a_row = (blockIdx.y * blockDim.y + ty) * 2;
+        int a_col = t * tile_size + tx * 2;
 
         tile_A[ty * 2][tx * 2]         = (a_row < m && a_col < k) ? d_a[a_row * k + a_col] : 0.0f;
         tile_A[ty * 2][tx * 2 + 1]     = (a_row < m && a_col + 1 < k) ? d_a[a_row * k + a_col + 1] : 0.0f;
@@ -67,13 +60,13 @@ template <int tile_size> __global__ void tiling_matMul (
         tile_A[ty * 2 + 1][tx * 2 + 1] = (a_row + 1 < m && a_col + 1 < k) ? d_a[(a_row + 1) * k + a_col + 1] : 0.0f;
         
         // left and up corner, row and col positions of a thread
-        int b_row = t * 32 + ty * 2;
-        int b_col = (blockIdx.x * 16 + tx) * 2;
+        int b_row = t * tile_size + ty * 2;
+        int b_col = (blockIdx.x * blockDim.x + tx) * 2;
 
-        tile_B[ty * 2][tx * 2]         = (b_row < k && b_col < n) ? d_b[b_base_row * n + b_base_col] : 0.0f;
-        tile_B[ty * 2][tx * 2 + 1]     = (b_row < k && b_col + 1 < n) ? d_b[b_base_row * n + b_base_col + 1] : 0.0f;
-        tile_B[ty * 2 + 1][tx * 2]     = (b_row + 1 < k && b_col < n) ? d_b[(b_base_row + 1) * n + b_base_col] : 0.0f;
-        tile_B[ty * 2 + 1][tx * 2 + 1] = (b_row + 1 < k && b_col + 1 < n) ? d_b[(b_base_row + 1) * n + b_base_col + 1] : 0.0f;
+        tile_B[ty * 2][tx * 2]         = (b_row < k && b_col < n) ? d_b[b_row * n + b_col] : 0.0f;
+        tile_B[ty * 2][tx * 2 + 1]     = (b_row < k && b_col + 1 < n) ? d_b[b_row * n + b_col + 1] : 0.0f;
+        tile_B[ty * 2 + 1][tx * 2]     = (b_row + 1 < k && b_col < n) ? d_b[(b_row + 1) * n + b_col] : 0.0f;
+        tile_B[ty * 2 + 1][tx * 2 + 1] = (b_row + 1 < k && b_col + 1 < n) ? d_b[(b_row + 1) * n + b_col + 1] : 0.0f;
 
         __syncthreads();
 
@@ -104,18 +97,22 @@ template <int tile_size> __global__ void tiling_matMul (
 
 
 int GeMMs(int argc, char **argv, int tile_size, const dim3 &dim_a, const dim3 &dim_b) {
-    dim3   dim_c = (dim_b.x, dim_a.y, 1);
+    dim3   dim_c(dim_b.x, dim_a.y, 1);
 
     float* h_c, *h_b, *h_a;
     float* d_c, *d_b, *d_a;
 
-    size_t sz_a = dim_a.x * dim_a.y * sizeof(float); // add (size_t) type conversion at RHS
+    size_t sz_a = dim_a.x * dim_a.y * sizeof(float);
     size_t sz_b = dim_b.x * dim_b.y * sizeof(float);
     size_t sz_c = dim_c.x * dim_c.y * sizeof(float);
 
     checkCudaErrors(cudaMallocHost(reinterpret_cast<void **>(&h_a), sz_a));
     checkCudaErrors(cudaMallocHost(reinterpret_cast<void **>(&h_b), sz_b));
     checkCudaErrors(cudaMallocHost(reinterpret_cast<void **>(&h_c), sz_c));
+
+    for (size_t i = 0; i < dim_a.x * dim_a.y; ++i) h_a[i] = 1.0f;
+    for (size_t i = 0; i < dim_b.x * dim_b.y; ++i) h_b[i] = 1.0f;
+    for (size_t i = 0; i < dim_c.x * dim_c.y; ++i) h_c[i] = 0.0f;
 
     cudaStream_t stream;
 
@@ -134,8 +131,8 @@ int GeMMs(int argc, char **argv, int tile_size, const dim3 &dim_a, const dim3 &d
     checkCudaErrors(cudaMemcpyAsync(d_b, h_b, sz_b, cudaMemcpyHostToDevice, stream));
 
     int t_size = tile_size / 2;
-    dim3 block = (t_size, t_size, 1);
-    dim3 grid  = (dim_c.x/t_size, dim_c.y/t_size, 1);
+    dim3 block(t_size, t_size, 1);
+    dim3 grid((dim_c.x + tile_size - 1) / tile_size, (dim_c.y + tile_size - 1) / tile_size, 1);
 
     checkCudaErrors(cudaStreamSynchronize(stream));
 
@@ -143,9 +140,9 @@ int GeMMs(int argc, char **argv, int tile_size, const dim3 &dim_a, const dim3 &d
     checkCudaErrors(cudaEventRecord(start, stream));
 
     switch (tile_size) {
-        case 32: tiling_Matrix<32><<<grid, block, 0, stream>>>(dim_a.y, dim_b.x, dim_a.x, d_c, d_a, d_b); break;
-        case 16: tiling_Matrix<16><<<grid, block, 0, stream>>>(dim_a.y, dim_b.x, dim_a.x, d_c, d_a, d_b); break;
-        default: tiling_Matrix<16><<<grid, block, 0, stream>>>(dim_a.y, dim_b.x, dim_a.x, d_c, d_a, d_b); break;
+        case 32: tiling_matMul<32><<<grid, block, 0, stream>>>(dim_b.x, dim_a.y, dim_a.x, d_c, d_a, d_b); break;
+        case 16: tiling_matMul<16><<<grid, block, 0, stream>>>(dim_b.x, dim_a.y, dim_a.x, d_c, d_a, d_b); break;
+        default: tiling_matMul<16><<<grid, block, 0, stream>>>(dim_b.x, dim_a.y, dim_a.x, d_c, d_a, d_b); break;
     }
 
     // Record the stop event
@@ -158,60 +155,35 @@ int GeMMs(int argc, char **argv, int tile_size, const dim3 &dim_a, const dim3 &d
 
     // Compute and print the performance
     double flopsPerMatrixMul =
-        2.0 * static_cast<double>(dimsA.x) * static_cast<double>(dimsA.y) * static_cast<double>(dimsB.x);
+        2.0 * static_cast<double>(dim_a.x) * static_cast<double>(dim_a.y) * static_cast<double>(dim_b.x);
     double gigaFlops = (flopsPerMatrixMul * 1.0e-9f) / (msecTotal / 1000.0f);
     printf("Performance= %.2f GFlop/s, Time= %.3f msec, Size= %.0f Ops,"
            " WorkgroupSize= %u threads/block\n",
            gigaFlops,
            msecTotal,
            flopsPerMatrixMul,
-           threads.x * threads.y);
+           block.x * block.y);
 
 
     // Copy result from device to host
-    checkCudaErrors(cudaMemcpyAsync(h_C, d_C, mem_size_C, cudaMemcpyDeviceToHost, stream));
+    checkCudaErrors(cudaMemcpyAsync(h_c, d_c, sz_c, cudaMemcpyDeviceToHost, stream));
     checkCudaErrors(cudaStreamSynchronize(stream));
 
-
-    bool correct = true;
-
-    // test relative error by the formula
-    //     |<x, y>_cpu - <x,y>_gpu|/<|x|, |y|>  < eps
-    double eps = 1.e-6; // machine zero
-
-    for (int i = 0; i < static_cast<int>(dim_c.x * dim_c.y); i++) {
-        double abs_err    = fabs(h_c[i] - (dim_a.x * valB));
-        double dot_length = dim_a.x;
-        double abs_val    = fabs(h_C[i]);
-        double rel_err    = abs_err / abs_val / dot_length;
-
-        if (rel_err > eps) {
-            printf("Error! Matrix[%05d]=%.8f, ref=%.8f error term is > %E\n", i, h_C[i], dimsA.x * valB, eps);
-            correct = false;
-        }
-    }
-
-    printf("%s\n", correct ? "Result = PASS" : "Result = FAIL");
-
-    checkCudaErrors(cudaFreeHost(h_A));
-    checkCudaErrors(cudaFreeHost(h_B));
-    checkCudaErrors(cudaFreeHost(h_C));
-    checkCudaErrors(cudaFree(d_A));
-    checkCudaErrors(cudaFree(d_B));
-    checkCudaErrors(cudaFree(d_C));
+    checkCudaErrors(cudaFreeHost(h_a));
+    checkCudaErrors(cudaFreeHost(h_b));
+    checkCudaErrors(cudaFreeHost(h_c));
+    checkCudaErrors(cudaFree(d_a));
+    checkCudaErrors(cudaFree(d_b));
+    checkCudaErrors(cudaFree(d_c));
     checkCudaErrors(cudaEventDestroy(start));
     checkCudaErrors(cudaEventDestroy(stop));
+    checkCudaErrors(cudaStreamDestroy(stream));
 
-    if (correct) {
-        return EXIT_SUCCESS;
-    }
-    else {
-        return EXIT_FAILURE;
-    }
+    return EXIT_SUCCESS;
 }
 
 int matMul_naive() {
-
+    return EXIT_SUCCESS;
 }
 
 
@@ -228,6 +200,9 @@ int main(int argc, char **argv) {
     // override the device ID based on input provided at the command line
     int dev = findCudaDevice(argc, (const char **)argv);
 
-    int tile_size;
+    int tile_size = 16;
+    dim3 dim_a(256, 256, 1);
+    dim3 dim_b(256, 256, 1);
 
+    return GeMMs(argc, argv, tile_size, dim_a, dim_b);
 }

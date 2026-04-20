@@ -4,8 +4,9 @@
 // Current fused attention implementation.
 // Notes:
 // 1. current output layout is [B, H, S, D]
-// 2. current dispatch supports head_dim = 32 / 64 / 128
-// 3. KV cache / paged attention path is not implemented yet
+// 2. this high-end variant keeps the wider dispatch range
+// 3. intended for devices that can tolerate larger shared-memory footprints
+// 4. KV cache / paged attention path is not implemented yet
 
 #include <math.h>
 #include <stdio.h>
@@ -243,8 +244,12 @@ void launch_block_size_kernel(
             fused_kernel<T, 64, head_dim><<<grid, block, 0, stream>>>(
                 head_num, max_seq_len, d_Q, d_K, d_V, d_Att);
             break;
+        case 128:
+            fused_kernel<T, 128, head_dim><<<grid, block, 0, stream>>>(
+                head_num, max_seq_len, d_Q, d_K, d_V, d_Att);
+            break;
         default:
-            printf("Unsupported block_size=%d. Use one of {16, 32, 64}.\n",
+            printf("Unsupported block_size=%d. Use one of {16, 32, 64, 128}.\n",
                    block_size);
             break;
     }
@@ -277,8 +282,13 @@ void launch_head_dim_kernel(
                 block_size, grid, block, stream, head_num, max_seq_len, d_Q, d_K, d_V,
                 d_Att);
             break;
+        case 128:
+            launch_block_size_kernel<T, 128>(
+                block_size, grid, block, stream, head_num, max_seq_len, d_Q, d_K, d_V,
+                d_Att);
+            break;
         default:
-            printf("Unsupported head_dim=%d. Use one of {32, 64}.\n",
+            printf("Unsupported head_dim=%d. Use one of {32, 64, 128}.\n",
                    head_dim);
             break;
     }

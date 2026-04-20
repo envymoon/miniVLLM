@@ -1,0 +1,4 @@
+flash attention validation
+B=1 H=2 S=32 D=64 block=32
+max_abs_error=0.00000021 max_rel_error=0.00210040 has_nan=false
+avg_time_ms=0.0955 estimated_TFLOPs=0.0055

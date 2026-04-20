@@ -1,0 +1,7 @@
+==PROF== Connected to process 8526 (/mnt/c/Users/ianha/Downloads/Projects/miniVLLM/bench/bin/flash_attention_verbose)
+==ERROR== ERR_NVGPUCTRPERM - The user does not have permission to access NVIDIA GPU Performance Counters on the target device 0. For instructions on enabling permissions and to get more information see https://developer.nvidia.com/ERR_NVGPUCTRPERM
+flash attention validation
+B=1 H=2 S=32 D=64 block=32
+max_abs_error=0.00000021 max_rel_error=0.00210040 has_nan=false
+avg_time_ms=0.2980 estimated_TFLOPs=0.0018
+==PROF== Disconnected from process 8526
