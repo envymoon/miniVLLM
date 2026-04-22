@@ -1,0 +1,62 @@
+nvcc -O3 -arch=sm_89 -Iinclude --ptxas-options=-v  kernels/flash_attention.cu -o bench/bin/flash_attention
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function '_Z12fused_kernelIfLi64ELi64EEviiPKfS1_S1_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelIfLi64ELi64EEviiPKfS1_S1_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 49152 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 23.160 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelIfLi32ELi64EEviiPKfS1_S1_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelIfLi32ELi64EEviiPKfS1_S1_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 24576 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 10.837 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelIfLi16ELi64EEviiPKfS1_S1_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelIfLi16ELi64EEviiPKfS1_S1_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 12288 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 11.499 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelIfLi64ELi32EEviiPKfS1_S1_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelIfLi64ELi32EEviiPKfS1_S1_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 24576 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 11.704 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelIfLi32ELi32EEviiPKfS1_S1_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelIfLi32ELi32EEviiPKfS1_S1_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 12288 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 12.000 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelIfLi16ELi32EEviiPKfS1_S1_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelIfLi16ELi32EEviiPKfS1_S1_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 6144 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 11.853 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelI6__halfLi64ELi64EEviiPKfS2_S2_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelI6__halfLi64ELi64EEviiPKfS2_S2_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 24576 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 11.513 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelI6__halfLi32ELi64EEviiPKfS2_S2_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelI6__halfLi32ELi64EEviiPKfS2_S2_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 12288 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 11.257 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelI6__halfLi16ELi64EEviiPKfS2_S2_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelI6__halfLi16ELi64EEviiPKfS2_S2_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 6144 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 11.444 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelI6__halfLi64ELi32EEviiPKfS2_S2_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelI6__halfLi64ELi32EEviiPKfS2_S2_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 34 registers, used 1 barriers, 12288 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 11.801 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelI6__halfLi32ELi32EEviiPKfS2_S2_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelI6__halfLi32ELi32EEviiPKfS2_S2_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 34 registers, used 1 barriers, 6144 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 12.006 ms
+ptxas info    : Compiling entry function '_Z12fused_kernelI6__halfLi16ELi32EEviiPKfS2_S2_Pf' for 'sm_89'
+ptxas info    : Function properties for _Z12fused_kernelI6__halfLi16ELi32EEviiPKfS2_S2_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 34 registers, used 1 barriers, 3072 bytes smem, 392 bytes cmem[0]
+ptxas info    : Compile time = 12.019 ms

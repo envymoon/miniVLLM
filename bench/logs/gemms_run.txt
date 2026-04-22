@@ -1,1 +1,0 @@
-Performance= 45.47 GFlop/s, Time= 0.738 msec, Size= 33554432 Ops, WorkgroupSize= 64 threads/block

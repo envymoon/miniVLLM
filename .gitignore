@@ -1,4 +1,5 @@
 GeMM_fault.cu
 flash_attention_fault.cu
+flash_attention_highend.cu
 
 # docs/

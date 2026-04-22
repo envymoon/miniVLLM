@@ -5,7 +5,6 @@
 // Notes:
 // 1. current output layout is [B, H, S, D]
 // 2. current dispatch supports head_dim = 32 / 64 / 128
-// 3. KV cache / paged attention path is not implemented yet
 
 #include <math.h>
 #include <stdio.h>
@@ -413,10 +412,10 @@ void reference_attention(
 }
 
 int validate_and_benchmark_flash_attention() {
-    const int block_size = 32;
-    const int batch_size = 1;
-    const int num_heads = 2;
-    const int max_seq_len = 32;
+    const int block_size = 16;
+    const int batch_size = 4;
+    const int num_heads = 8;
+    const int max_seq_len = 64;
     const int head_dim = 64;
     const bool is_fp16 = false;
     const int warmup = 5;
