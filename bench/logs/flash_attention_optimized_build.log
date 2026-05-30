@@ -1,7 +1,0 @@
-nvcc -O3 -arch=sm_89 -Iinclude --ptxas-options=-v  kernels/flash_attention_optimized.cu -o bench/bin/flash_attention_optimized
-kernels/flash_attention_optimized.cu(79): error: identifier "CUDART_INF_F" is undefined
-          float row_max = -CUDART_INF_F;
-                           ^
-
-1 error detected in the compilation of "kernels/flash_attention_optimized.cu".
-make: *** [Makefile:11: bench/bin/flash_attention_optimized] Error 2

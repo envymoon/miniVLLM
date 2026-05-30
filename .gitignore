@@ -1,5 +1,7 @@
 GeMM_fault.cu
 flash_attention_fault.cu
 flash_attention_highend.cu
-
-# docs/
+flash_attention_optimized.cu
+compile_profile_tutorial.md
+.codex
+docs/

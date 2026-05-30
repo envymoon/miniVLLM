@@ -1,0 +1,12 @@
+nvcc -O3 -arch=sm_89 -Iinclude --ptxas-options=-v  kernels/paged_kv_cache/paged_kv_cache.cu -o bench/bin/paged_kv_cache
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function '_ZN46_GLOBAL__N__1917a038_17_paged_kv_cache_cu_main29paged_decode_attention_kernelEPK6__halfS2_S2_PKiS4_iiiiiiPS0_' for 'sm_89'
+ptxas info    : Function properties for _ZN46_GLOBAL__N__1917a038_17_paged_kv_cache_cu_main29paged_decode_attention_kernelEPK6__halfS2_S2_PKiS4_iiiiiiPS0_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 424 bytes cmem[0]
+ptxas info    : Compile time = 43.008 ms
+ptxas info    : Compiling entry function '_ZN46_GLOBAL__N__1917a038_17_paged_kv_cache_cu_main22append_kv_cache_kernelEPK6__halfS2_PKiS4_iiiiiiPS0_S5_' for 'sm_89'
+ptxas info    : Function properties for _ZN46_GLOBAL__N__1917a038_17_paged_kv_cache_cu_main22append_kv_cache_kernelEPK6__halfS2_PKiS4_iiiiiiPS0_S5_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 22 registers, used 0 barriers, 424 bytes cmem[0]
+ptxas info    : Compile time = 2.441 ms

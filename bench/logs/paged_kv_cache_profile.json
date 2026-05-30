@@ -1,0 +1,16 @@
+{
+  "kernel": "paged_kv_cache_decode",
+  "status": "not_run",
+  "reason": "CUDA driver version is insufficient for CUDA runtime version",
+  "compiled": true,
+  "target_arch": "sm_89",
+  "ptxas": {
+    "decode_registers": 40,
+    "decode_spill_stores": 0,
+    "decode_spill_loads": 0,
+    "append_registers": 22,
+    "append_spill_stores": 0,
+    "append_spill_loads": 0
+  },
+  "rerun": "bash scripts/profile_paged_kv_cache.sh 512 8"
+}
