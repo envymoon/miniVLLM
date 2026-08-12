@@ -4,4 +4,7 @@ flash_attention_highend.cu
 flash_attention_optimized.cu
 compile_profile_tutorial.md
 .codex
-docs/
+docs/*
+!docs/architecture.md
+__pycache__/
+*.py[cod]

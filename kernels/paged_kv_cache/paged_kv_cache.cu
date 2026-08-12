@@ -1,7 +1,7 @@
 // ============================================================================
 // Paged KV Cache + Paged Decode Attention
 // ============================================================================
-// This file is intentionally standalone for learning and profiling.
+// This file is intentionally standalone for validation and profiling.
 //
 // Implemented pieces:
 // 1. host-side block allocator with sequence block tables
