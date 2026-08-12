@@ -131,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-parallel-size", type=int, default=1)
     parser.add_argument("--max-num-seqs", type=int, default=32)
     parser.add_argument("--max-num-batched-tokens", type=int, default=256)
+    parser.add_argument("--max-model-len", type=int, default=2048)
     parser.add_argument("--num-gpu-blocks", type=int, default=256)
     parser.add_argument("--backend", choices=("reference", "cuda"), default="reference")
     parser.add_argument("--model", default=None, help="local Hugging Face Llama directory")
@@ -138,6 +139,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument(
         "--dtype", choices=("auto", "float32", "float16", "bfloat16"), default="auto"
+    )
+    parser.add_argument(
+        "--attention-backend",
+        choices=("auto", "torch", "custom"),
+        default="auto",
     )
     parser.add_argument(
         "--cudagraph-mode",
@@ -153,12 +159,14 @@ def main() -> None:
         data_parallel_size=args.data_parallel_size,
         max_num_seqs=args.max_num_seqs,
         max_num_batched_tokens=args.max_num_batched_tokens,
+        max_model_len=args.max_model_len,
         num_gpu_blocks=args.num_gpu_blocks,
         worker_backend=args.backend,
         model_path=args.model,
         tokenizer_path=args.tokenizer,
         device=args.device,
         dtype=args.dtype,
+        attention_backend=args.attention_backend,
         cudagraph_mode=args.cudagraph_mode,
     )
     engine = AsyncLLMEngine(config)

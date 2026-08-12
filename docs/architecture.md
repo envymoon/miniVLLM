@@ -135,9 +135,23 @@ append_kv(flat_input_ids, flat_slot_mapping)
 C ABI。两者的接口完全相同。
 
 配置本地模型目录时，`LlamaModelRunner` 加载标准 safetensors 权重。每层维护独立的
-`[num_blocks * block_size, num_kv_heads, head_dim]` K/V tensor；Q/K 使用 RoPE 后，K/V
-通过 `slot_mapping` 写入物理位置，attention 再通过请求 block table 对应的 context slots
-读取。prefill 与 decode 可以在同一次模型调用中执行。
+`[physical_slots + graph_scratch_slots, num_kv_heads, head_dim]` K/V tensor。Q/K 使用
+RoPE 后，自定义 Torch CUDA extension 直接接收 tensor 指针：
+
+```text
+append_kv_(K, V, layer_cache, slot_mapping, active_mask)
+flash_prefill_out(Q, layer_cache, positions, block_tables, ...)
+paged_decode_out(Q, layer_cache, seq_lens, block_tables, ...)
+```
+
+append kernel 先把本轮真实 K/V 写入物理 slot。Flash Prefill kernel 对每个 query token
+执行 causal online softmax，因此 chunked prefill 可以读取前序 chunk；Paged Decode
+kernel 以 request/head 为 grid，通过 block table 遍历历史 KV。GQA 通过
+`query_head // (query_heads / kv_heads)` 映射 KV head。两个 attention kernel 对 mixed
+batch 中不同请求分流，并写入同一个输出 tensor。
+
+CPU 和显式 `torch` backend 使用同一 `AttentionMetadata` 的 PyTorch reference，便于数值
+对照。CUDA `auto/custom` 路径不会进行 Q/K/V host copy。
 
 原始优化 kernel 和 NCU 命令没有被塞进 Python 调度代码；优化 kernel 可以在稳定 ABI
 后面替换 launch，再分别测量系统吞吐和 kernel 指标。
@@ -154,28 +168,31 @@ C ABI。两者的接口完全相同。
 6. `minivllm/cache.py`：block table 与 slot mapping；
 7. `minivllm/worker/batch.py`：调度输出到 GPU batch metadata；
 8. `minivllm/worker/model_runner.py`：模型执行边界；
-9. `minivllm/model_executor/llama.py`：最小 Llama 与层级分页 KV Cache；
-10. `minivllm/worker/cudagraph.py`：decode graph 分派和 eager fallback；
-11. `minivllm/worker/operator_runtime.py`：CPU/CUDA 算子适配；
-12. `runtime/minivllm_ops.cu` 与 `kernels/`：CUDA 实现和 NCU 分析。
+9. `minivllm/model_executor/attention.py`：Torch/custom attention backend 与 tensor metadata；
+10. `minivllm/model_executor/llama.py`：Llama、层级分页 KV Cache 与 graph state；
+11. `minivllm/worker/cudagraph.py`：decode graph 分派和 eager fallback；
+12. `minivllm/worker/operator_runtime.py`：bootstrap CPU/CUDA 算子适配；
+13. `runtime/torch_attention*`：真实 Llama tensor ABI；
+14. `runtime/minivllm_ops.cu` 与 `kernels/`：bootstrap ABI、CUDA 实现和 NCU 分析。
 
 ## 7. CUDA Graph 边界
 
 `CUDAGraphDispatcher` 只把 uniform decode batch 映射到配置的 capture bucket。mixed
-prefill/decode 和超过最大 bucket 的 batch 都回退 eager。Manager 只有在 ModelRunner
-明确提供 `execute_cudagraph(batch, capture_size)` 时才会报告 `cuda_graph`。CUDA
-bootstrap runtime 为每个 capture size 缓存一个 `cudaGraphExec_t`，其 graph 包含批量
-KV append 与 paged decode attention；每次 replay 前只更新持久 device input buffer。
-当前 Llama 路径仍是动态 gather，因此不会虚报 graph replay。
+prefill/decode 和超过最大 bucket 的 batch 都回退 eager。Manager 还检查 ModelRunner 的
+`supports_cudagraph`，因此 CPU 和 Torch reference 不会虚报 graph replay。
 
-真实模型 capture/replay 的剩余工作集中在 Worker 内：让层级 Q/K/V 使用 graph-safe
-paged decode kernel，并复用已经存在的静态 buffer、dummy padding 和 capture cache
-模式。Scheduler 与 IPC 协议无需因 CUDA Graph 改变。
+真实 Llama 每个 bucket 保存一个 `LlamaCUDAGraphState`：静态 input ids、positions、
+slot mapping、seq lens、block tables、active mask、输出 logits 和 `torch.cuda.CUDAGraph`。
+首次命中时在 side stream warm-up，随后捕获整个 model forward；之后复制当轮 metadata
+并 replay。非活动 padding token 不写 KV，padding slot 指向 Worker 专用 scratch 区。
+
+CUDA Graph 包含真实 embedding/GEMM/RoPE、所有层的 Flash/Paged attention、MLP、norm
+和 LM head；采样留在 graph 外，以便不同请求继续使用各自 temperature。Scheduler 与
+IPC 协议不因 CUDA Graph 改变。
 
 ## 8. 后续实现顺序
 
-1. 让真实 Q/K/V tensor 直接进入定制 Flash/Paged Attention ABI；
-2. 为纯 decode 实现静态输入 buffer 和 CUDA Graph capture/replay；
-3. 增加 top-p/top-k sampler 和确定性随机数状态；
-4. 建立 workload generator、TTFT/ITL/JCT 与公平性实验指标；
-5. 接入可插拔调度策略、prefix caching、preemption 和跨节点通信。
+1. 增加 top-p/top-k sampler 和确定性随机数状态；
+2. 建立 workload generator、TTFT/ITL/JCT 与公平性实验指标；
+3. 优化 Flash/Paged kernel 的 warp tiling、向量化和 Tensor Core 路径；
+4. 接入可插拔调度策略、prefix caching、preemption 和跨节点通信。

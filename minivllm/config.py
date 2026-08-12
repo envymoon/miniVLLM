@@ -34,6 +34,7 @@ class EngineConfig:
     tokenizer_path: str | None = None
     device: str = "auto"
     dtype: str = "auto"
+    attention_backend: str = "auto"
     cudagraph_mode: str = "none"
     cudagraph_capture_sizes: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
     process_start_method: str = "spawn"
@@ -61,6 +62,8 @@ class EngineConfig:
             raise ValueError("device must be 'auto', 'cpu', or a CUDA device")
         if self.dtype not in {"auto", "float32", "float16", "bfloat16"}:
             raise ValueError("unsupported model dtype")
+        if self.attention_backend not in {"auto", "torch", "custom"}:
+            raise ValueError("unsupported attention backend")
         if self.cudagraph_mode not in {"none", "full_decode_only"}:
             raise ValueError("cudagraph_mode must be 'none' or 'full_decode_only'")
         if (

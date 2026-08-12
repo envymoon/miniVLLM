@@ -6,6 +6,8 @@ from minivllm.worker.cudagraph import CUDAGraphDispatcher, CUDAGraphManager
 
 
 class GraphRunner:
+    supports_cudagraph = True
+
     def __init__(self) -> None:
         self.capture_size = None
 
@@ -17,6 +19,10 @@ class GraphRunner:
     ) -> dict[str, int]:
         self.capture_size = capture_size
         return {"mode": 1}
+
+
+class EagerOnlyRunner(GraphRunner):
+    supports_cudagraph = False
 
 
 class CUDAGraphDispatcherTest(unittest.TestCase):
@@ -53,6 +59,22 @@ class CUDAGraphDispatcherTest(unittest.TestCase):
         self.assertEqual(output, {"mode": 1})
         self.assertEqual(mode, "cuda_graph")
         self.assertEqual(runner.capture_size, 1)
+
+    def test_manager_respects_runner_graph_capability(self) -> None:
+        batch = GPUInputBatch.from_worker_batch(
+            WorkerBatch(
+                1,
+                [WorkerItem("r", [3], 1, [1], [0], 2, 1, True)],
+            ),
+            block_size=4,
+        )
+
+        output, mode = CUDAGraphManager(
+            "full_decode_only", (1, 2)
+        ).execute(EagerOnlyRunner(), batch)
+
+        self.assertEqual(output, {"mode": 0})
+        self.assertEqual(mode, "eager")
 
 
 if __name__ == "__main__":

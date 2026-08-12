@@ -50,6 +50,8 @@ class BootstrapModelRunner:
 
 
 class CudaBootstrapModelRunner(BootstrapModelRunner):
+    supports_cudagraph = True
+
     def execute_cudagraph(
         self, batch: GPUInputBatch, capture_size: int
     ) -> dict[str, int]:
@@ -70,6 +72,8 @@ def create_model_runner(config: EngineConfig) -> ModelRunner:
             device=config.device,
             dtype=config.dtype,
             data_parallel_rank=config.data_parallel_rank,
+            max_num_seqs=config.max_num_seqs,
+            attention_backend=config.attention_backend,
         )
     runtime = create_kernel_runtime(
         config.worker_backend,

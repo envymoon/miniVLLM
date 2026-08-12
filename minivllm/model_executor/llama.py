@@ -10,6 +10,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from .attention import (
+    AttentionBackend,
+    AttentionMetadata,
+    create_attention_backend,
+)
 from ..worker.batch import GPUInputBatch
 
 
@@ -104,9 +109,10 @@ def apply_rotary_embedding(
 
 
 class LlamaAttention(nn.Module):
-    def __init__(self, config: LlamaConfig) -> None:
+    def __init__(self, config: LlamaConfig, backend: AttentionBackend) -> None:
         super().__init__()
         self.config = config
+        self.backend = backend
         head_dim = config.head_dim
         self.q_proj = nn.Linear(
             config.hidden_size,
@@ -133,7 +139,7 @@ class LlamaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        batch: GPUInputBatch,
+        metadata: AttentionMetadata,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
     ) -> torch.Tensor:
@@ -151,47 +157,10 @@ class LlamaAttention(nn.Module):
             query, key, positions, self.config.rope_theta
         )
 
-        slots = torch.tensor(batch.slot_mapping, device=hidden_states.device)
-        key_cache[slots] = key
-        value_cache[slots] = value
-
-        outputs: list[torch.Tensor] = []
-        groups = self.config.num_attention_heads // self.config.num_key_value_heads
-        if self.config.num_attention_heads % self.config.num_key_value_heads:
-            raise ValueError("attention heads must be divisible by KV heads")
-        for request_index in range(batch.num_requests):
-            query_start = batch.query_start_loc[request_index]
-            query_end = batch.query_start_loc[request_index + 1]
-            context_start = batch.context_start_loc[request_index]
-            context_end = batch.context_start_loc[request_index + 1]
-            context_slots = torch.tensor(
-                batch.context_slot_mapping[context_start:context_end],
-                device=hidden_states.device,
-            )
-            request_key = key_cache[context_slots]
-            request_value = value_cache[context_slots]
-            if groups > 1:
-                request_key = request_key.repeat_interleave(groups, dim=1)
-                request_value = request_value.repeat_interleave(groups, dim=1)
-
-            request_query = query[query_start:query_end].transpose(0, 1).unsqueeze(0)
-            request_key = request_key.transpose(0, 1).unsqueeze(0)
-            request_value = request_value.transpose(0, 1).unsqueeze(0)
-            query_positions = positions[query_start:query_end]
-            key_positions = torch.arange(
-                batch.seq_lens[request_index], device=hidden_states.device
-            )
-            causal_mask = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
-            attention = F.scaled_dot_product_attention(
-                request_query,
-                request_key,
-                request_value,
-                attn_mask=causal_mask.unsqueeze(0).unsqueeze(0),
-                dropout_p=0.0,
-                is_causal=False,
-            )
-            outputs.append(attention.squeeze(0).transpose(0, 1))
-        return self.o_proj(torch.cat(outputs, dim=0).reshape(-1, self.config.hidden_size))
+        attention = self.backend.forward(
+            query, key, value, key_cache, value_cache, metadata
+        )
+        return self.o_proj(attention.reshape(-1, self.config.hidden_size))
 
 
 class LlamaMLP(nn.Module):
@@ -212,9 +181,9 @@ class LlamaMLP(nn.Module):
 
 
 class LlamaDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig) -> None:
+    def __init__(self, config: LlamaConfig, backend: AttentionBackend) -> None:
         super().__init__()
-        self.self_attn = LlamaAttention(config)
+        self.self_attn = LlamaAttention(config, backend)
         self.mlp = LlamaMLP(config)
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -223,7 +192,7 @@ class LlamaDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        batch: GPUInputBatch,
+        metadata: AttentionMetadata,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
     ) -> torch.Tensor:
@@ -231,7 +200,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             self.input_layernorm(hidden_states),
             positions,
-            batch,
+            metadata,
             key_cache,
             value_cache,
         )
@@ -240,27 +209,31 @@ class LlamaDecoderLayer(nn.Module):
 
 
 class LlamaModel(nn.Module):
-    def __init__(self, config: LlamaConfig) -> None:
+    def __init__(self, config: LlamaConfig, backend: AttentionBackend) -> None:
         super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)
+            LlamaDecoderLayer(config, backend)
+            for _ in range(config.num_hidden_layers)
         )
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
 
 class LlamaForCausalLM(nn.Module):
-    def __init__(self, config: LlamaConfig) -> None:
+    def __init__(
+        self, config: LlamaConfig, backend: AttentionBackend | None = None
+    ) -> None:
         super().__init__()
         self.config = config
-        self.model = LlamaModel(config)
+        self.backend = backend or create_attention_backend("torch", torch.device("cpu"))
+        self.model = LlamaModel(config, self.backend)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        batch: GPUInputBatch,
+        metadata: AttentionMetadata,
         key_cache: list[torch.Tensor],
         value_cache: list[torch.Tensor],
     ) -> torch.Tensor:
@@ -269,7 +242,7 @@ class LlamaForCausalLM(nn.Module):
             hidden_states = layer(
                 hidden_states,
                 positions,
-                batch,
+                metadata,
                 key_cache[index],
                 value_cache[index],
             )
@@ -331,6 +304,15 @@ def resolve_torch_dtype(dtype: str, device: torch.device) -> torch.dtype:
     }[dtype]
 
 
+@dataclass(slots=True)
+class LlamaCUDAGraphState:
+    input_ids: torch.Tensor
+    positions: torch.Tensor
+    metadata: AttentionMetadata
+    graph: torch.cuda.CUDAGraph | None = None
+    logits: torch.Tensor | None = None
+
+
 class LlamaModelRunner:
     """Correctness-first Llama runner with Worker-owned paged layer KV caches."""
 
@@ -343,6 +325,8 @@ class LlamaModelRunner:
         device: str,
         dtype: str,
         data_parallel_rank: int,
+        max_num_seqs: int = 32,
+        attention_backend: str = "auto",
     ) -> None:
         self.config = LlamaConfig.from_model_dir(model_path)
         if max_model_len > self.config.max_position_embeddings:
@@ -351,12 +335,20 @@ class LlamaModelRunner:
             )
         self.device = resolve_torch_device(device, data_parallel_rank)
         self.dtype = resolve_torch_dtype(dtype, self.device)
-        self.model = LlamaForCausalLM(self.config)
+        self.block_size = block_size
+        self.max_model_len = max_model_len
+        self.max_num_seqs = max_num_seqs
+        self.max_blocks = (max_model_len + block_size - 1) // block_size
+        self.attention_backend = create_attention_backend(
+            attention_backend, self.device
+        )
+        self.model = LlamaForCausalLM(self.config, self.attention_backend)
         load_safetensor_weights(self.model, model_path)
         self.model.to(device=self.device, dtype=self.dtype).eval()
 
+        self.physical_cache_slots = num_gpu_blocks * block_size
         cache_shape = (
-            num_gpu_blocks * block_size,
+            self.physical_cache_slots + max_num_seqs,
             self.config.num_key_value_heads,
             self.config.head_dim,
         )
@@ -368,14 +360,23 @@ class LlamaModelRunner:
             torch.empty(cache_shape, device=self.device, dtype=self.dtype)
             for _ in range(self.config.num_hidden_layers)
         ]
+        self._graph_states: dict[int, LlamaCUDAGraphState] = {}
 
-    @torch.inference_mode()
-    def execute_model(self, batch: GPUInputBatch) -> dict[str, int]:
-        input_ids = torch.tensor(batch.input_ids, device=self.device, dtype=torch.long)
-        positions = torch.tensor(batch.positions, device=self.device, dtype=torch.long)
-        logits = self.model(
-            input_ids, positions, batch, self.key_cache, self.value_cache
+    @property
+    def supports_cudagraph(self) -> bool:
+        return self.device.type == "cuda" and self.attention_backend.graph_safe
+
+    def _metadata(self, batch: GPUInputBatch) -> AttentionMetadata:
+        return AttentionMetadata.from_batch(
+            batch,
+            self.device,
+            self.block_size,
+            max_blocks=self.max_blocks,
         )
+
+    def _sample_logits(
+        self, batch: GPUInputBatch, logits: torch.Tensor
+    ) -> dict[str, int]:
         sampled: dict[str, int] = {}
         for index, request_id in enumerate(batch.request_ids):
             sample_index = batch.sample_indices[index]
@@ -391,8 +392,147 @@ class LlamaModelRunner:
             sampled[request_id] = token_id
         return sampled
 
+    @torch.inference_mode()
+    def execute_model(self, batch: GPUInputBatch) -> dict[str, int]:
+        input_ids = torch.tensor(batch.input_ids, device=self.device, dtype=torch.long)
+        positions = torch.tensor(batch.positions, device=self.device, dtype=torch.long)
+        metadata = self._metadata(batch)
+        logits = self.model(
+            input_ids, positions, metadata, self.key_cache, self.value_cache
+        )
+        return self._sample_logits(batch, logits)
+
+    def _create_graph_state(self, capture_size: int) -> LlamaCUDAGraphState:
+        if capture_size > self.max_num_seqs:
+            raise ValueError("capture size exceeds max_num_seqs")
+        input_ids = torch.zeros(capture_size, device=self.device, dtype=torch.long)
+        positions = torch.zeros(capture_size, device=self.device, dtype=torch.long)
+        metadata = AttentionMetadata(
+            positions=torch.zeros(
+                capture_size, device=self.device, dtype=torch.int32
+            ),
+            slot_mapping=torch.empty(
+                capture_size, device=self.device, dtype=torch.int32
+            ),
+            query_start_loc=torch.arange(
+                capture_size + 1, device=self.device, dtype=torch.int32
+            ),
+            seq_lens=torch.ones(
+                capture_size, device=self.device, dtype=torch.int32
+            ),
+            block_tables=torch.zeros(
+                (capture_size, self.max_blocks),
+                device=self.device,
+                dtype=torch.int32,
+            ),
+            request_indices=torch.arange(
+                capture_size, device=self.device, dtype=torch.int32
+            ),
+            is_decode=torch.ones(
+                capture_size, device=self.device, dtype=torch.bool
+            ),
+            active_mask=torch.zeros(
+                capture_size, device=self.device, dtype=torch.bool
+            ),
+            block_size=self.block_size,
+        )
+        return LlamaCUDAGraphState(input_ids, positions, metadata)
+
+    def _copy_decode_batch(
+        self, state: LlamaCUDAGraphState, batch: GPUInputBatch
+    ) -> None:
+        if not batch.descriptor.uniform_decode:
+            raise ValueError("Llama CUDA Graph requires a uniform decode batch")
+        count = batch.num_requests
+        capture_size = state.input_ids.numel()
+        if count > capture_size:
+            raise ValueError("batch exceeds CUDA Graph capture size")
+        state.input_ids.zero_()
+        state.positions.zero_()
+        state.metadata.positions.zero_()
+        state.metadata.seq_lens.fill_(1)
+        state.metadata.block_tables.zero_()
+        state.metadata.active_mask.zero_()
+        state.input_ids[:count].copy_(
+            torch.tensor(batch.input_ids, device=self.device, dtype=torch.long)
+        )
+        state.positions[:count].copy_(
+            torch.tensor(batch.positions, device=self.device, dtype=torch.long)
+        )
+        state.metadata.positions[:count].copy_(
+            torch.tensor(batch.positions, device=self.device, dtype=torch.int32)
+        )
+        state.metadata.slot_mapping[:count].copy_(
+            torch.tensor(batch.slot_mapping, device=self.device, dtype=torch.int32)
+        )
+        state.metadata.seq_lens[:count].copy_(
+            torch.tensor(batch.seq_lens, device=self.device, dtype=torch.int32)
+        )
+        table_width = len(batch.block_tables[0])
+        state.metadata.block_tables[:count, :table_width].copy_(
+            torch.tensor(
+                batch.block_tables, device=self.device, dtype=torch.int32
+            )
+        )
+        state.metadata.active_mask[:count] = True
+        if count < capture_size:
+            state.metadata.slot_mapping[count:].copy_(
+                torch.arange(
+                    self.physical_cache_slots + count,
+                    self.physical_cache_slots + capture_size,
+                    device=self.device,
+                    dtype=torch.int32,
+                )
+            )
+
+    def _capture_graph(self, state: LlamaCUDAGraphState) -> None:
+        current_stream = torch.cuda.current_stream(self.device)
+        warmup_stream = torch.cuda.Stream(device=self.device)
+        warmup_stream.wait_stream(current_stream)
+        with torch.cuda.stream(warmup_stream):
+            for _ in range(3):
+                self.model(
+                    state.input_ids,
+                    state.positions,
+                    state.metadata,
+                    self.key_cache,
+                    self.value_cache,
+                )
+        current_stream.wait_stream(warmup_stream)
+        torch.cuda.synchronize(self.device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            state.logits = self.model(
+                state.input_ids,
+                state.positions,
+                state.metadata,
+                self.key_cache,
+                self.value_cache,
+            )
+        state.graph = graph
+
+    @torch.inference_mode()
+    def execute_cudagraph(
+        self, batch: GPUInputBatch, capture_size: int
+    ) -> dict[str, int]:
+        if not self.supports_cudagraph:
+            return self.execute_model(batch)
+        state = self._graph_states.get(capture_size)
+        if state is None:
+            state = self._create_graph_state(capture_size)
+            self._graph_states[capture_size] = state
+        self._copy_decode_batch(state, batch)
+        if state.graph is None:
+            self._capture_graph(state)
+        else:
+            state.graph.replay()
+        if state.logits is None:
+            raise RuntimeError("CUDA Graph did not produce logits")
+        return self._sample_logits(batch, state.logits)
+
     def close(self) -> None:
         self.key_cache.clear()
         self.value_cache.clear()
+        self._graph_states.clear()
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)

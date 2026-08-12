@@ -54,6 +54,7 @@ class CUDAGraphManager:
     ) -> tuple[dict[str, int], str]:
         decision = self.dispatcher.dispatch(batch.descriptor)
         execute_graph = getattr(runner, "execute_cudagraph", None)
-        if decision.wants_graph and execute_graph is not None:
+        supports_graph = bool(getattr(runner, "supports_cudagraph", False))
+        if decision.wants_graph and supports_graph and execute_graph is not None:
             return execute_graph(batch, decision.capture_size), "cuda_graph"
         return runner.execute_model(batch), "eager"

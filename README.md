@@ -13,7 +13,9 @@
 - DP>1 时由独立 Coordinator 负载均衡；每个 rank 的 Worker 拥有独立分页 KV Cache；
 - Scheduler 输出被压平为一个 `GPUInputBatch`，Worker 每轮只调用一次 ModelRunner；
 - 支持 mixed prefill/decode batch、本地 Llama safetensors 和 Hugging Face tokenizer；
-- CUDA C ABI 以一次 launch 处理 batch 中所有 attention 请求；
+- 真实 Llama Q/K/V 通过 PyTorch CUDA tensor ABI 进入自定义 Flash Prefill 与
+  Paged Decode kernel；
+- 纯 decode 的真实 Llama forward 支持按 capture bucket 进行 CUDA Graph replay；
 - `/metrics` 提供 batch/token/prefill/decode/Worker 执行时间统计，生成结果携带
   TTFT、ITL 和端到端延迟；
 - 原有 `kernels/`、`bench/` 和 NCU 脚本保持为算子性能分析入口。
@@ -80,13 +82,19 @@ pip install -e ".[model]"
 python -m minivllm.entrypoints.api_server \
   --model /models/llama \
   --device cuda:0 \
-  --dtype float16
+  --dtype float16 \
+  --attention-backend custom \
+  --cudagraph-mode full_decode_only
 ```
 
 最小 Llama runner 当前支持标准 RoPE、RMSNorm、GQA/MHA、SwiGLU、greedy 和
 temperature sampling。每层 K/V tensor 按 `physical_block * block_size + offset` 写入，
-mixed batch 根据请求的 block table 读取上下文。CUDA 上的 PyTorch SDPA 可选择 Flash
-Attention 后端；把仓库内定制 Flash/Paged kernel 直接连接到真实 Q/K/V ABI 是下一阶段。
+mixed batch 根据请求的 block table 读取上下文。`auto` 在 CUDA 设备上等价于 `custom`，
+在 CPU 上使用相同分页语义的 PyTorch reference；`torch` 可显式用于 CUDA 对照实验。
+
+自定义 backend 首次启动时通过 PyTorch extension 编译 `runtime/torch_attention.cpp` 和
+`runtime/torch_attention_cuda.cu`，需要 CUDA Toolkit、与 PyTorch 匹配的编译器及 Ninja。
+编译产物由 PyTorch 缓存，后续 Worker 直接加载。
 
 ## CUDA 算子运行时
 
@@ -97,8 +105,8 @@ make
 ./scripts/profile_paged_kv_cache.sh 512 8
 ```
 
-另外提供了 Worker 可加载的稳定 C ABI。它持久持有 KV Cache，并接受 EngineCore 产生
-的 slot mapping、block table 和压平后的 batch metadata：
+bootstrap Worker 另外保留 ctypes C ABI。它持久持有合成 KV Cache，并接受 EngineCore
+产生的 slot mapping、block table 和压平后的 batch metadata：
 
 ```bash
 make native
@@ -110,6 +118,22 @@ correctness-first 的参考 launch；`kernels/flash_attention/flash_attention_pr
 `kernels/paged_kv_cache/paged_kv_cache.cu` 仍是优化与 NCU 的主战场。把优化 kernel
 替换进 C ABI 不会影响系统层。
 
+真实 Llama 不经过 ctypes，也不复制 Q/K/V 到 host。Torch extension 直接接收以下 CUDA
+tensor：
+
+```text
+Q                    [scheduled_tokens, query_heads, head_dim]
+K/V                  [scheduled_tokens, kv_heads, head_dim]
+layer KV cache       [physical_slots, kv_heads, head_dim]
+slot_mapping         [scheduled_tokens]
+block_tables         [requests, max_blocks]
+positions/seq_lens   token/request metadata
+```
+
+每层先用 `append_kv_` 写入真实 K/V，然后 `flash_prefill_out` 处理所有 prefill token，
+`paged_decode_out` 处理 decode 请求。两个 kernel 使用同一 CUDA stream，并写入同一个
+attention output tensor。
+
 ## CUDA Graph 状态
 
 系统已经提供 `BatchDescriptor`、decode capture-size bucket、统一 dispatcher 和 eager
@@ -117,15 +141,17 @@ fallback：
 
 ```bash
 python -m minivllm.entrypoints.api_server \
-  --backend cuda \
+  --model /models/llama \
+  --device cuda:0 \
+  --attention-backend custom \
   --cudagraph-mode full_decode_only
 ```
 
-CUDA bootstrap runtime 为纯 decode bucket 维护静态 device buffer，并缓存对应的
-`cudaGraphExec_t`；输入数据更新后直接 replay。mixed/prefill batch 会回退 eager。真实
-Llama attention 仍包含动态上下文 gather，所以 Llama ModelRunner 暂时也明确回退 eager，
-并在 batch metrics 中报告实际执行模式。后续把 graph-safe 真实 Q/K/V kernel 接到同一
-Manager 即可，不需要修改 Scheduler。
+真实 Llama 为每个 capture size 维护静态 input、position、slot mapping、block table 和
+active mask。首次命中执行 warm-up 并捕获 embedding、全部 decoder layers、自定义 Paged
+Attention 与 LM head；后续只更新静态 tensor 并 replay。padding 行使用 KV scratch slots，
+不会覆盖活动请求。mixed/prefill batch、CPU 和 `torch` attention backend 会回退 eager，
+实际模式记录在 batch metrics 中。
 
 ## 目录
 
@@ -133,12 +159,14 @@ Manager 即可，不需要修改 Scheduler。
 minivllm/
   engine/             # facade、DP Coordinator、EngineCore、IPC client
   worker/             # Worker、GPUInputBatch、ModelRunner、CUDA Graph dispatcher
-  model_executor/     # 最小 Llama 模型层和分页 KV tensor
+  model_executor/     # Llama、attention backend、分页 KV tensor 与 graph state
   entrypoints/        # API server 进程入口
   cache.py            # 物理块池和请求 block table
   scheduler.py        # v1 风格 token scheduler
 runtime/
-  minivllm_ops.cu     # Worker 调用的 CUDA C ABI
+  minivllm_ops.cu             # bootstrap ctypes CUDA C ABI
+  torch_attention.cpp         # 真实 Q/K/V Torch extension 入口
+  torch_attention_cuda.cu     # Flash Prefill / Paged Decode kernels
 kernels/              # 原有 CUDA 算子与 benchmark
 tests/                 # 内存、调度、多进程与异步并发测试
 ```
@@ -147,8 +175,8 @@ tests/                 # 内存、调度、多进程与异步并发测试
 
 - tensor parallel / pipeline parallel；
 - prefix caching、LoRA、speculative decoding；
-- graph-safe 真实 Q/K/V 自定义 Paged Attention 的 CUDA Graph replay；
 - Llama RoPE scaling、量化权重和非 Llama 模型；
+- 针对 Tensor Core、长上下文和不同 head_dim 的 attention kernel 深度优化；
 - 分布式节点协调和生产级故障恢复；
 - 完整 OpenAI API 与 vLLM 参数兼容层。
 
