@@ -19,6 +19,13 @@ class EngineProcessTest(unittest.TestCase):
         self.assertEqual("".join(item.text for item in outputs), " min")
         self.assertTrue(outputs[-1].finished)
         self.assertEqual(outputs[-1].finish_reason, FinishReason.LENGTH)
+        self.assertIsNotNone(outputs[-1].metrics)
+        self.assertGreater(outputs[-1].metrics.num_scheduled_tokens, 0)
+        self.assertIsNotNone(outputs[-1].request_metrics)
+        self.assertIsNotNone(outputs[-1].request_metrics.time_to_first_token_s)
+        self.assertIsNotNone(outputs[-1].request_metrics.end_to_end_latency_s)
+        self.assertGreaterEqual(engine.metrics.total_batches, 1)
+        self.assertGreater(engine.metrics.total_scheduled_tokens, 0)
 
     def test_async_engine_handles_concurrent_requests(self) -> None:
         async def run() -> list[str]:

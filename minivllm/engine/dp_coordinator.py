@@ -6,7 +6,7 @@ from dataclasses import replace
 from multiprocessing.queues import Queue
 
 from ..config import EngineConfig
-from ..protocol import CommandType, EngineCommand, RequestOutput
+from ..protocol import BatchMetrics, CommandType, EngineCommand, RequestOutput
 from .core import engine_core_process_main
 
 
@@ -78,10 +78,12 @@ class DPCoordinator:
         for rank, rank_queue in enumerate(self.rank_output_queues):
             while True:
                 try:
-                    output: RequestOutput = rank_queue.get_nowait()
+                    output: RequestOutput | BatchMetrics = rank_queue.get_nowait()
                 except queue.Empty:
                     break
                 self.output_queue.put(output)
+                if isinstance(output, BatchMetrics):
+                    continue
                 if output.finished:
                     self.request_ranks.pop(output.request_id, None)
                     self.rank_load[rank] = max(0, self.rank_load[rank] - 1)

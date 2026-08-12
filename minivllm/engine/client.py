@@ -6,8 +6,15 @@ import threading
 import uuid
 
 from ..config import EngineConfig, SamplingParams
-from ..protocol import CommandType, EngineCommand, EngineRequest, RequestOutput
-from ..tokenizer import CharacterTokenizer
+from ..protocol import (
+    BatchMetrics,
+    CommandType,
+    EngineCommand,
+    EngineMetricsSnapshot,
+    EngineRequest,
+    RequestOutput,
+)
+from ..tokenizer import create_tokenizer
 from .core import engine_core_process_main
 from .dp_coordinator import dp_coordinator_process_main
 
@@ -17,12 +24,19 @@ class EngineCoreClient:
 
     def __init__(self, config: EngineConfig) -> None:
         self.config = config
-        self.tokenizer = CharacterTokenizer()
+        self.tokenizer = create_tokenizer(config.model_path, config.tokenizer_path)
         self.context = mp.get_context(config.process_start_method)
         self.command_queue = self.context.Queue()
         self.output_queue = self.context.Queue()
         self._streams: dict[str, queue.Queue[RequestOutput]] = {}
         self._streams_lock = threading.Lock()
+        self._metrics_lock = threading.Lock()
+        self._seen_batches: set[tuple[int, int]] = set()
+        self._total_batches = 0
+        self._total_scheduled_tokens = 0
+        self._total_prefill_tokens = 0
+        self._total_decode_tokens = 0
+        self._total_worker_execute_time_s = 0.0
         self._closed = False
         process_target = (
             dp_coordinator_process_main
@@ -47,7 +61,25 @@ class EngineCoreClient:
 
     def _route_outputs(self) -> None:
         while True:
-            output: RequestOutput = self.output_queue.get()
+            event: RequestOutput | BatchMetrics = self.output_queue.get()
+            metrics = event if isinstance(event, BatchMetrics) else event.metrics
+            if metrics is not None:
+                key = (metrics.rank, metrics.batch_id)
+                with self._metrics_lock:
+                    if key not in self._seen_batches:
+                        self._seen_batches.add(key)
+                        self._total_batches += 1
+                        self._total_scheduled_tokens += (
+                            metrics.num_scheduled_tokens
+                        )
+                        self._total_prefill_tokens += metrics.num_prefill_tokens
+                        self._total_decode_tokens += metrics.num_decode_tokens
+                        self._total_worker_execute_time_s += (
+                            metrics.execute_time_s
+                        )
+            if isinstance(event, BatchMetrics):
+                continue
+            output = event
             with self._streams_lock:
                 stream = self._streams.get(output.request_id)
             if stream is not None:
@@ -87,6 +119,17 @@ class EngineCoreClient:
         if not self._closed:
             self.command_queue.put(
                 EngineCommand(CommandType.ABORT, request_id=request_id)
+            )
+
+    @property
+    def metrics(self) -> EngineMetricsSnapshot:
+        with self._metrics_lock:
+            return EngineMetricsSnapshot(
+                total_batches=self._total_batches,
+                total_scheduled_tokens=self._total_scheduled_tokens,
+                total_prefill_tokens=self._total_prefill_tokens,
+                total_decode_tokens=self._total_decode_tokens,
+                total_worker_execute_time_s=self._total_worker_execute_time_s,
             )
 
     def close(self) -> None:

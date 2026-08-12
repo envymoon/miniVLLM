@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from ..config import EngineConfig, SamplingParams
-from ..protocol import RequestOutput
+from ..protocol import EngineMetricsSnapshot, RequestOutput
 from .client import EngineCoreClient
 
 
@@ -37,6 +37,10 @@ class AsyncLLMEngine:
 
     async def abort(self, request_id: str) -> None:
         self.client.abort(request_id)
+
+    @property
+    def metrics(self) -> EngineMetricsSnapshot:
+        return self.client.metrics
 
     def close(self) -> None:
         self.client.close()

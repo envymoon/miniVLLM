@@ -9,6 +9,13 @@ description = "A compact vLLM v1-style multiprocess inference runtime"
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+model = [
+    "torch>=2.2",
+    "safetensors>=0.4",
+    "transformers>=4.40",
+]
+
 [project.scripts]
 minivllm-api = "minivllm.entrypoints.api_server:main"
 

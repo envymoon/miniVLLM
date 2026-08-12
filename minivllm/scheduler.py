@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
 from .cache import KVCacheManager
 from .config import EngineConfig, SamplingParams
-from .protocol import EngineRequest, FinishReason, WorkerItem
-from .tokenizer import CharacterTokenizer
+from .protocol import EngineRequest, FinishReason, RequestMetrics, WorkerItem
+from .tokenizer import create_tokenizer
 
 
 @dataclass(slots=True)
@@ -18,6 +19,10 @@ class RequestState:
     output_token_ids: list[int] = field(default_factory=list)
     num_computed_tokens: int = 0
     rank: int | None = None
+    arrival_time_s: float = field(default_factory=time.perf_counter)
+    first_token_time_s: float | None = None
+    last_token_time_s: float | None = None
+    last_itl_s: float | None = None
 
     @property
     def all_token_ids(self) -> list[int]:
@@ -40,7 +45,7 @@ class Scheduler:
         self.cache_manager = KVCacheManager(
             config.num_gpu_blocks, config.block_size
         )
-        self.tokenizer = CharacterTokenizer()
+        self.tokenizer = create_tokenizer(config.model_path, config.tokenizer_path)
 
     def add_request(self, request: EngineRequest) -> None:
         if request.request_id in self.running or any(
@@ -108,6 +113,7 @@ class Scheduler:
                 seq_len=target,
                 generated_count=len(request.output_token_ids),
                 should_sample=target == len(all_tokens),
+                temperature=request.sampling_params.temperature,
             )
             by_rank.setdefault(request.rank, []).append(item)  # type: ignore[arg-type]
             scheduled_counts[request.request_id] = count
@@ -119,7 +125,13 @@ class Scheduler:
 
     def append_token(self, request_id: str, token_id: int) -> FinishReason | None:
         request = self.running[request_id]
-        if token_id == 1:
+        now = time.perf_counter()
+        if request.first_token_time_s is None:
+            request.first_token_time_s = now
+        if request.last_token_time_s is not None:
+            request.last_itl_s = now - request.last_token_time_s
+        request.last_token_time_s = now
+        if token_id == self.tokenizer.eos_token_id:
             return FinishReason.STOP
         request.output_token_ids.append(token_id)
         output_text = self.tokenizer.decode(request.output_token_ids)
@@ -134,6 +146,25 @@ class Scheduler:
         if request.num_computed_tokens + 1 >= context_limit:
             return FinishReason.LENGTH
         return None
+
+    def output_text(self, request_id: str) -> str:
+        return self.tokenizer.decode(self.running[request_id].output_token_ids)
+
+    def request_metrics(
+        self, request_id: str, finished: bool = False
+    ) -> RequestMetrics:
+        request = self.running[request_id]
+        now = time.perf_counter()
+        return RequestMetrics(
+            time_to_first_token_s=(
+                None
+                if request.first_token_time_s is None
+                else request.first_token_time_s - request.arrival_time_s
+            ),
+            inter_token_latency_s=request.last_itl_s,
+            end_to_end_latency_s=now - request.arrival_time_s if finished else None,
+            num_output_tokens=len(request.output_token_ids),
+        )
 
     def finish(self, request_id: str) -> RequestState | None:
         request = self.running.pop(request_id, None)

@@ -40,6 +40,31 @@ class SchedulerTest(unittest.TestCase):
                 EngineRequest("r", "abc", [10, 11, 12], SamplingParams())
             )
 
+    def test_new_prefill_joins_running_decode_batch(self) -> None:
+        scheduler = Scheduler(
+            EngineConfig(
+                max_num_batched_tokens=8,
+                block_size=4,
+                num_gpu_blocks=8,
+            )
+        )
+        scheduler.add_request(
+            EngineRequest("decode", "ab", [10, 11], SamplingParams(max_tokens=2))
+        )
+        first = scheduler.schedule()
+        scheduler.update_computed("decode", first.scheduled_counts["decode"])
+        scheduler.append_token("decode", 12)
+        scheduler.add_request(
+            EngineRequest("prefill", "cd", [20, 21], SamplingParams(max_tokens=2))
+        )
+
+        mixed = scheduler.schedule()
+
+        items = mixed.by_rank[0]
+        self.assertEqual([item.request_id for item in items], ["decode", "prefill"])
+        self.assertEqual([len(item.token_ids) for item in items], [1, 2])
+        self.assertEqual([item.generated_count for item in items], [1, 0])
+
 
 if __name__ == "__main__":
     unittest.main()

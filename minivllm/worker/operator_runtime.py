@@ -5,6 +5,10 @@ import math
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .batch import GPUInputBatch
 
 
 class KernelRuntime(ABC):
@@ -21,6 +25,11 @@ class KernelRuntime(ABC):
         self, block_table: list[int], seq_len: int, block_size: int
     ) -> None: ...
 
+    @abstractmethod
+    def attention_batch(self, batch: GPUInputBatch) -> None:
+        """Execute all prefill/decode attention work represented by one batch."""
+        ...
+
 
 class ReferenceKernelRuntime(KernelRuntime):
     """CPU reference for the same append/prefill/decode calls as the CUDA ABI.
@@ -35,6 +44,7 @@ class ReferenceKernelRuntime(KernelRuntime):
         self.k_cache: dict[int, list[float]] = {}
         self.v_cache: dict[int, list[float]] = {}
         self.last_attention_output: list[float] = []
+        self.last_batch_attention_outputs: list[list[float]] = []
 
     def _vector(self, token_id: int, phase: float) -> list[float]:
         return [math.sin(token_id * 0.01 + dim * phase) for dim in range(self.head_dim)]
@@ -79,12 +89,32 @@ class ReferenceKernelRuntime(KernelRuntime):
             return
         self.last_attention_output = self._online_attention(self.k_cache[slots[-1]], slots)
 
+    def attention_batch(self, batch: GPUInputBatch) -> None:
+        outputs: list[list[float]] = []
+        for request_index in range(batch.num_requests):
+            start = batch.context_start_loc[request_index]
+            end = batch.context_start_loc[request_index + 1]
+            slots = batch.context_slot_mapping[start:end]
+            if not slots:
+                outputs.append([])
+                continue
+            outputs.append(self._online_attention(self.k_cache[slots[-1]], slots))
+        self.last_batch_attention_outputs = outputs
+        if outputs:
+            self.last_attention_output = outputs[-1]
+
 
 class CudaKernelRuntime(KernelRuntime):
     """ctypes adapter for the small C ABI in runtime/minivllm_ops.cu."""
 
     def __init__(
-        self, num_blocks: int, block_size: int, head_dim: int = 64, device_index: int = 0
+        self,
+        num_blocks: int,
+        block_size: int,
+        head_dim: int = 64,
+        device_index: int = 0,
+        max_num_seqs: int = 32,
+        max_model_len: int = 2048,
     ) -> None:
         root = Path(__file__).resolve().parents[2]
         names = ["minivllm_ops.dll", "libminivllm_ops.so", "libminivllm_ops.dylib"]
@@ -100,6 +130,8 @@ class CudaKernelRuntime(KernelRuntime):
         self._lib = ctypes.CDLL(str(library_path))
         self._lib.mvllm_create.restype = ctypes.c_void_p
         self._lib.mvllm_create.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
@@ -123,8 +155,33 @@ class CudaKernelRuntime(KernelRuntime):
             ctypes.c_int,
             ctypes.c_int,
         ]
+        self._lib.mvllm_attention_batch.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_int,
+        ]
+        self._lib.mvllm_execute_decode_graph.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
         self._handle = self._lib.mvllm_create(
-            device_index, num_blocks, block_size, head_dim
+            device_index,
+            num_blocks,
+            block_size,
+            head_dim,
+            max_num_seqs,
+            max_model_len,
         )
         if not self._handle:
             raise RuntimeError("failed to initialize CUDA KV cache")
@@ -161,6 +218,41 @@ class CudaKernelRuntime(KernelRuntime):
             "decode",
         )
 
+    def attention_batch(self, batch: GPUInputBatch) -> None:
+        flat_tables = [block for table in batch.block_tables for block in table]
+        max_blocks = len(batch.block_tables[0])
+        self._check(
+            self._lib.mvllm_attention_batch(
+                self._handle,
+                self._array(batch.context_slot_mapping),
+                self._array(batch.context_start_loc),
+                self._array(flat_tables),
+                max_blocks,
+                self._array(batch.seq_lens),
+                self._array([int(value) for value in batch.is_decode]),
+                batch.num_requests,
+            ),
+            "attention batch",
+        )
+
+    def execute_decode_graph(self, batch: GPUInputBatch, capture_size: int) -> None:
+        if not batch.descriptor.uniform_decode:
+            raise ValueError("CUDA Graph execution requires a uniform decode batch")
+        flat_tables = [block for table in batch.block_tables for block in table]
+        self._check(
+            self._lib.mvllm_execute_decode_graph(
+                self._handle,
+                self._array(batch.input_ids),
+                self._array(batch.slot_mapping),
+                self._array(flat_tables),
+                len(batch.block_tables[0]),
+                self._array(batch.seq_lens),
+                batch.num_requests,
+                capture_size,
+            ),
+            "decode graph",
+        )
+
     def close(self) -> None:
         if getattr(self, "_handle", None):
             self._lib.mvllm_destroy(self._handle)
@@ -171,10 +263,19 @@ class CudaKernelRuntime(KernelRuntime):
 
 
 def create_kernel_runtime(
-    backend: str, num_blocks: int, block_size: int, device_index: int = 0
+    backend: str,
+    num_blocks: int,
+    block_size: int,
+    device_index: int = 0,
+    max_num_seqs: int = 32,
+    max_model_len: int = 2048,
 ) -> KernelRuntime:
     if backend == "cuda":
         return CudaKernelRuntime(
-            num_blocks, block_size, device_index=device_index
+            num_blocks,
+            block_size,
+            device_index=device_index,
+            max_num_seqs=max_num_seqs,
+            max_model_len=max_model_len,
         )
     return ReferenceKernelRuntime()

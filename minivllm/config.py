@@ -30,6 +30,12 @@ class EngineConfig:
     block_size: int = 16
     num_gpu_blocks: int = 256
     worker_backend: str = "reference"
+    model_path: str | None = None
+    tokenizer_path: str | None = None
+    device: str = "auto"
+    dtype: str = "auto"
+    cudagraph_mode: str = "none"
+    cudagraph_capture_sizes: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
     process_start_method: str = "spawn"
     scheduler_idle_timeout_s: float = 0.01
 
@@ -47,6 +53,23 @@ class EngineConfig:
                 raise ValueError(f"{name} must be positive")
         if self.worker_backend not in {"reference", "cuda"}:
             raise ValueError("worker_backend must be 'reference' or 'cuda'")
+        if (
+            self.device != "auto"
+            and self.device != "cpu"
+            and not self.device.startswith("cuda")
+        ):
+            raise ValueError("device must be 'auto', 'cpu', or a CUDA device")
+        if self.dtype not in {"auto", "float32", "float16", "bfloat16"}:
+            raise ValueError("unsupported model dtype")
+        if self.cudagraph_mode not in {"none", "full_decode_only"}:
+            raise ValueError("cudagraph_mode must be 'none' or 'full_decode_only'")
+        if (
+            not self.cudagraph_capture_sizes
+            or any(size <= 0 for size in self.cudagraph_capture_sizes)
+            or tuple(sorted(set(self.cudagraph_capture_sizes)))
+            != self.cudagraph_capture_sizes
+        ):
+            raise ValueError("cudagraph_capture_sizes must be sorted unique positives")
         if self.data_parallel_rank < 0:
             raise ValueError("data_parallel_rank must be non-negative")
         if self.process_start_method not in {"spawn", "fork", "forkserver"}:

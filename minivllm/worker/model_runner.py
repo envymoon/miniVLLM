@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from .operator_runtime import KernelRuntime
-from ..protocol import WorkerItem
+from typing import Protocol
+
+from ..config import EngineConfig
 from ..tokenizer import CharacterTokenizer
+from .batch import GPUInputBatch
+from .operator_runtime import KernelRuntime, create_kernel_runtime
+
+
+class ModelRunner(Protocol):
+    def execute_model(self, batch: GPUInputBatch) -> dict[str, int]: ...
+
+    def close(self) -> None: ...
 
 
 class BootstrapModelRunner:
@@ -16,21 +25,63 @@ class BootstrapModelRunner:
         self.tokenizer = CharacterTokenizer()
         self._response_tokens = self.tokenizer.encode(self._response)
 
-    def execute(self, item: WorkerItem) -> int | None:
-        self.runtime.append_kv(item.token_ids, item.slot_mapping)
-        if item.generated_count == 0:
-            prefix_slots = [
-                item.block_table[position // self.block_size] * self.block_size
-                + position % self.block_size
-                for position in range(item.seq_len)
-            ]
-            self.runtime.flash_attention_prefill(prefix_slots)
-        else:
-            self.runtime.paged_decode_attention(
-                item.block_table, item.seq_len, self.block_size
-            )
-        if not item.should_sample:
-            return None
-        if item.generated_count >= len(self._response_tokens):
-            return self.tokenizer.eos_token_id
-        return self._response_tokens[item.generated_count]
+    def execute_model(self, batch: GPUInputBatch) -> dict[str, int]:
+        """Run one flattened batch rather than invoking the runner per request."""
+        self.runtime.append_kv(batch.input_ids, batch.slot_mapping)
+        self.runtime.attention_batch(batch)
+        return self._sample(batch)
+
+    def _sample(self, batch: GPUInputBatch) -> dict[str, int]:
+        sampled: dict[str, int] = {}
+        for index, request_id in enumerate(batch.request_ids):
+            if batch.sample_indices[index] < 0:
+                continue
+            generated_count = batch.generated_counts[index]
+            if generated_count >= len(self._response_tokens):
+                sampled[request_id] = self.tokenizer.eos_token_id
+            else:
+                sampled[request_id] = self._response_tokens[generated_count]
+        return sampled
+
+    def close(self) -> None:
+        close = getattr(self.runtime, "close", None)
+        if close is not None:
+            close()
+
+
+class CudaBootstrapModelRunner(BootstrapModelRunner):
+    def execute_cudagraph(
+        self, batch: GPUInputBatch, capture_size: int
+    ) -> dict[str, int]:
+        execute_graph = getattr(self.runtime, "execute_decode_graph")
+        execute_graph(batch, capture_size)
+        return self._sample(batch)
+
+
+def create_model_runner(config: EngineConfig) -> ModelRunner:
+    if config.model_path is not None:
+        from ..model_executor.llama import LlamaModelRunner
+
+        return LlamaModelRunner(
+            model_path=config.model_path,
+            num_gpu_blocks=config.num_gpu_blocks,
+            block_size=config.block_size,
+            max_model_len=config.max_model_len,
+            device=config.device,
+            dtype=config.dtype,
+            data_parallel_rank=config.data_parallel_rank,
+        )
+    runtime = create_kernel_runtime(
+        config.worker_backend,
+        config.num_gpu_blocks,
+        config.block_size,
+        device_index=config.data_parallel_rank,
+        max_num_seqs=config.max_num_seqs,
+        max_model_len=config.max_model_len,
+    )
+    runner_type = (
+        CudaBootstrapModelRunner
+        if config.worker_backend == "cuda"
+        else BootstrapModelRunner
+    )
+    return runner_type(runtime, config.block_size)

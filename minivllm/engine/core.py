@@ -16,7 +16,7 @@ from ..protocol import (
     WorkerResult,
 )
 from ..scheduler import Scheduler
-from ..tokenizer import CharacterTokenizer
+from ..tokenizer import create_tokenizer
 from ..worker.worker import worker_process_main
 
 
@@ -35,7 +35,7 @@ class EngineCore:
         self.command_queue = command_queue
         self.output_queue = output_queue
         self.scheduler = Scheduler(config)
-        self.tokenizer = CharacterTokenizer()
+        self.tokenizer = create_tokenizer(config.model_path, config.tokenizer_path)
         self.worker_result_queue = context.Queue()
         self.worker_queues = [context.Queue() for _ in range(config.data_parallel_size)]
         self.workers = [
@@ -114,6 +114,8 @@ class EngineCore:
                 results[result.rank] = result
 
         for result in results.values():
+            if result.metrics is not None:
+                self.output_queue.put(result.metrics)
             if result.error:
                 for item in schedule.by_rank[result.rank]:
                     self._emit_error(item.request_id, result.error)
@@ -128,8 +130,14 @@ class EngineCore:
                 token_id = result.sampled_token_ids.get(item.request_id)
                 if token_id is None:
                     continue
+                previous_text = self.scheduler.output_text(item.request_id)
                 finish_reason = self.scheduler.append_token(item.request_id, token_id)
-                text = "" if token_id == self.tokenizer.eos_token_id else self.tokenizer.decode([token_id])
+                current_text = self.scheduler.output_text(item.request_id)
+                text = (
+                    current_text[len(previous_text) :]
+                    if current_text.startswith(previous_text)
+                    else self.tokenizer.decode([token_id])
+                )
                 self.output_queue.put(
                     RequestOutput(
                         request_id=item.request_id,
@@ -137,6 +145,10 @@ class EngineCore:
                         text=text,
                         finished=finish_reason is not None,
                         finish_reason=finish_reason,
+                        metrics=result.metrics,
+                        request_metrics=self.scheduler.request_metrics(
+                            item.request_id, finished=finish_reason is not None
+                        ),
                     )
                 )
                 if finish_reason is not None:

@@ -42,6 +42,8 @@ class RequestOutput:
     finished: bool
     finish_reason: FinishReason | None = None
     error: str | None = None
+    metrics: BatchMetrics | None = None
+    request_metrics: RequestMetrics | None = None
 
 
 @dataclass(slots=True)
@@ -54,6 +56,7 @@ class WorkerItem:
     seq_len: int
     generated_count: int
     should_sample: bool
+    temperature: float = 0.0
 
 
 @dataclass(slots=True)
@@ -62,12 +65,48 @@ class WorkerBatch:
     items: list[WorkerItem]
 
 
+@dataclass(frozen=True, slots=True)
+class BatchMetrics:
+    batch_id: int
+    rank: int
+    num_requests: int
+    num_scheduled_tokens: int
+    num_prefill_tokens: int
+    num_decode_tokens: int
+    execute_time_s: float
+    execution_mode: str = "eager"
+
+
+@dataclass(frozen=True, slots=True)
+class EngineMetricsSnapshot:
+    total_batches: int
+    total_scheduled_tokens: int
+    total_prefill_tokens: int
+    total_decode_tokens: int
+    total_worker_execute_time_s: float
+
+    @property
+    def average_tokens_per_batch(self) -> float:
+        if self.total_batches == 0:
+            return 0.0
+        return self.total_scheduled_tokens / self.total_batches
+
+
+@dataclass(frozen=True, slots=True)
+class RequestMetrics:
+    time_to_first_token_s: float | None
+    inter_token_latency_s: float | None
+    end_to_end_latency_s: float | None
+    num_output_tokens: int
+
+
 @dataclass(slots=True)
 class WorkerResult:
     batch_id: int
     rank: int
     sampled_token_ids: dict[str, int]
     error: str | None = None
+    metrics: BatchMetrics | None = None
 
 
 @dataclass(slots=True)

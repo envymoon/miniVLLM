@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -26,6 +27,12 @@ def _handler(engine: AsyncLLMEngine) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:
             if self.path == "/health":
                 self._json(HTTPStatus.OK, {"status": "ok"})
+            elif self.path == "/metrics":
+                metrics = asdict(engine.metrics)
+                metrics["average_tokens_per_batch"] = (
+                    engine.metrics.average_tokens_per_batch
+                )
+                self._json(HTTPStatus.OK, metrics)
             else:
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -53,23 +60,27 @@ def _handler(engine: AsyncLLMEngine) -> type[BaseHTTPRequestHandler]:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
 
         def _complete(self, prompt: str, params: SamplingParams) -> None:
-            async def collect() -> tuple[str, str | None]:
+            async def collect() -> tuple[str, str | None, dict[str, Any] | None]:
                 text = ""
                 reason = None
+                request_metrics = None
                 async for output in engine.generate(prompt, params):
                     if output.error:
                         raise RuntimeError(output.error)
                     text += output.text
                     reason = output.finish_reason.value if output.finish_reason else None
-                return text, reason
+                    if output.request_metrics is not None:
+                        request_metrics = asdict(output.request_metrics)
+                return text, reason, request_metrics
 
             try:
-                text, reason = asyncio.run(collect())
+                text, reason, request_metrics = asyncio.run(collect())
                 self._json(
                     HTTPStatus.OK,
                     {
                         "object": "text_completion",
                         "choices": [{"text": text, "finish_reason": reason, "index": 0}],
+                        "metrics": request_metrics,
                     },
                 )
             except RuntimeError as error:
@@ -122,6 +133,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-num-batched-tokens", type=int, default=256)
     parser.add_argument("--num-gpu-blocks", type=int, default=256)
     parser.add_argument("--backend", choices=("reference", "cuda"), default="reference")
+    parser.add_argument("--model", default=None, help="local Hugging Face Llama directory")
+    parser.add_argument("--tokenizer", default=None, help="optional local tokenizer directory")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--dtype", choices=("auto", "float32", "float16", "bfloat16"), default="auto"
+    )
+    parser.add_argument(
+        "--cudagraph-mode",
+        choices=("none", "full_decode_only"),
+        default="none",
+    )
     return parser
 
 
@@ -133,6 +155,11 @@ def main() -> None:
         max_num_batched_tokens=args.max_num_batched_tokens,
         num_gpu_blocks=args.num_gpu_blocks,
         worker_backend=args.backend,
+        model_path=args.model,
+        tokenizer_path=args.tokenizer,
+        device=args.device,
+        dtype=args.dtype,
+        cudagraph_mode=args.cudagraph_mode,
     )
     engine = AsyncLLMEngine(config)
     server = ThreadingHTTPServer((args.host, args.port), _handler(engine))

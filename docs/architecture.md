@@ -27,7 +27,7 @@ EngineCore + Scheduler rank 0  EngineCore + Scheduler rank 1
     │ WorkerBatch / Result         │ WorkerBatch / Result
     ▼                              ▼
 ModelRunner rank 0             ModelRunner rank 1      Worker processes
-KernelRuntime + KV cache       KernelRuntime + KV cache
+GPUInputBatch + KV cache       GPUInputBatch + KV cache
 ```
 
 ### API / Facade
@@ -80,6 +80,24 @@ FINISHED: release all physical blocks
 模型的 token。长 prompt 会被 `max_num_batched_tokens` 自动切块；decode 通常差一个
 token。
 
+Scheduler 允许新进入的 prefill 请求和已经运行的 decode 请求出现在同一轮。它输出的
+`WorkerItem` 列表在 Worker 中压平为一个 `GPUInputBatch`：
+
+```text
+input_ids / positions / slot_mapping        flat token axis
+query_start_loc                             request -> query range
+seq_lens / block_tables                     request -> paged context
+context_slot_mapping / context_start_loc    reference attention metadata
+sample_indices                              request -> logits row
+```
+
+Worker 每轮只调用一次 `ModelRunner.execute_model(batch)`。默认 runtime 也只执行一次
+批量 KV append 和一次批量 attention 入口，不再按请求调用 ModelRunner。
+
+每个 batch 会报告 scheduled/prefill/decode token 数、请求数、实际执行模式和 Worker
+执行时间；请求状态另外记录 TTFT、最近一次 ITL 与端到端延迟。这些字段位于公开输出
+协议中，可直接作为后续调度策略实验的原始数据。
+
 ## 4. Paged KV Cache
 
 每个 EngineCore 的 `KVCacheManager` 维护：
@@ -100,17 +118,26 @@ Scheduler 在创建 `WorkerItem` 时产生 `slot_mapping`。Worker 使用它写 
 
 ## 5. Attention 接入
 
-Worker 的固定调用顺序为：
+默认 bootstrap Worker 的固定调用顺序为：
 
 ```text
-append_kv(token_ids, slot_mapping)
-  ├─ generated_count == 0 -> flash_attention_prefill(prefix_slots)
-  └─ generated_count > 0  -> paged_decode_attention(block_table, seq_len)
+append_kv(flat_input_ids, flat_slot_mapping)
+  └─ attention_batch(
+       context_slot_mapping,
+       context_start_loc,
+       block_tables,
+       seq_lens,
+       is_decode)
 ```
 
 `ReferenceKernelRuntime` 用小向量执行相同的 online-softmax 与分页寻址，便于在没有 GPU
 的机器验证系统。`CudaKernelRuntime` 通过 ctypes 加载 `runtime/minivllm_ops.cu` 提供的
 C ABI。两者的接口完全相同。
+
+配置本地模型目录时，`LlamaModelRunner` 加载标准 safetensors 权重。每层维护独立的
+`[num_blocks * block_size, num_kv_heads, head_dim]` K/V tensor；Q/K 使用 RoPE 后，K/V
+通过 `slot_mapping` 写入物理位置，attention 再通过请求 block table 对应的 context slots
+读取。prefill 与 decode 可以在同一次模型调用中执行。
 
 原始优化 kernel 和 NCU 命令没有被塞进 Python 调度代码；优化 kernel 可以在稳定 ABI
 后面替换 launch，再分别测量系统吞吐和 kernel 指标。
@@ -125,19 +152,30 @@ C ABI。两者的接口完全相同。
 4. `minivllm/engine/core.py`：rank-local 事件循环与 Worker 执行；
 5. `minivllm/scheduler.py`：token budget 与 chunked prefill；
 6. `minivllm/cache.py`：block table 与 slot mapping；
-7. `minivllm/worker/model_runner.py`：模型执行边界；
-8. `minivllm/worker/operator_runtime.py`：CPU/CUDA 算子适配；
-9. `runtime/minivllm_ops.cu` 与 `kernels/`：CUDA 实现和 NCU 分析。
+7. `minivllm/worker/batch.py`：调度输出到 GPU batch metadata；
+8. `minivllm/worker/model_runner.py`：模型执行边界；
+9. `minivllm/model_executor/llama.py`：最小 Llama 与层级分页 KV Cache；
+10. `minivllm/worker/cudagraph.py`：decode graph 分派和 eager fallback；
+11. `minivllm/worker/operator_runtime.py`：CPU/CUDA 算子适配；
+12. `runtime/minivllm_ops.cu` 与 `kernels/`：CUDA 实现和 NCU 分析。
 
-## 7. 接入真实模型的推荐顺序
+## 7. CUDA Graph 边界
 
-1. 增加模型配置和权重加载，只让 Worker 读取权重；
-2. 将 `CharacterTokenizer` 换成模型 tokenizer，但仍在 API 进程编码；
-3. 用真实 embedding、RMSNorm、GEMM、RoPE 和 LM head 替换
-   `BootstrapModelRunner`；
-4. 让 Q/K/V tensor 直接进入现有 Flash/Paged Attention ABI；
-5. 增加采样器，使 temperature/top-p/top-k 真正作用于 logits；
-6. 最后再增加 prefix caching、preemption 和跨节点通信。
+`CUDAGraphDispatcher` 只把 uniform decode batch 映射到配置的 capture bucket。mixed
+prefill/decode 和超过最大 bucket 的 batch 都回退 eager。Manager 只有在 ModelRunner
+明确提供 `execute_cudagraph(batch, capture_size)` 时才会报告 `cuda_graph`。CUDA
+bootstrap runtime 为每个 capture size 缓存一个 `cudaGraphExec_t`，其 graph 包含批量
+KV append 与 paged decode attention；每次 replay 前只更新持久 device input buffer。
+当前 Llama 路径仍是动态 gather，因此不会虚报 graph replay。
 
-这个顺序能始终保留一条可运行、可测试的请求链路，也便于定位错误属于系统层、模型层
-还是算子层。
+真实模型 capture/replay 的剩余工作集中在 Worker 内：让层级 Q/K/V 使用 graph-safe
+paged decode kernel，并复用已经存在的静态 buffer、dummy padding 和 capture cache
+模式。Scheduler 与 IPC 协议无需因 CUDA Graph 改变。
+
+## 8. 后续实现顺序
+
+1. 让真实 Q/K/V tensor 直接进入定制 Flash/Paged Attention ABI；
+2. 为纯 decode 实现静态输入 buffer 和 CUDA Graph capture/replay；
+3. 增加 top-p/top-k sampler 和确定性随机数状态；
+4. 建立 workload generator、TTFT/ITL/JCT 与公平性实验指标；
+5. 接入可插拔调度策略、prefix caching、preemption 和跨节点通信。
